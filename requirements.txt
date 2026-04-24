@@ -1,0 +1,4 @@
+paho-mqtt
+numpy
+opencv-python-headless
+pyyaml
