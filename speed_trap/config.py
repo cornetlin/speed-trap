@@ -13,7 +13,8 @@ class StationConfig:
     frame_width: int
     frame_height: int
     frame_fps: int
-    detection_model_path: Path
+    hef_path: Path
+    hailofilter_so_path: Path
     vehicle_classes: tuple[str, ...]
     trigger_line_y: float
     mqtt_broker: str | None
@@ -42,7 +43,8 @@ def load_config(path: Path) -> StationConfig:
         frame_width=int(data["frame_width"]),
         frame_height=int(data["frame_height"]),
         frame_fps=int(data["frame_fps"]),
-        detection_model_path=Path(data["detection_model_path"]),
+        hef_path=Path(data["hef_path"]),
+        hailofilter_so_path=Path(data["hailofilter_so_path"]),
         vehicle_classes=tuple(data["vehicle_classes"]),
         trigger_line_y=float(data["trigger_line_y"]),
         mqtt_broker=data.get("mqtt_broker"),

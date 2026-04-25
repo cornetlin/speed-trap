@@ -49,7 +49,6 @@ except Exception as exc:  # pragma: no cover - hardware-only path
 
 
 _QUEUE_MAX = 512
-_DEFAULT_POSTPROCESS_SO = "/usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so"
 
 
 class HailoDetectionSource:
@@ -67,7 +66,6 @@ class HailoDetectionSource:
         self,
         config: StationConfig,
         *,
-        postprocess_so: str = _DEFAULT_POSTPROCESS_SO,
         queue_max: int = _QUEUE_MAX,
     ) -> None:
         if _IMPORT_ERROR is not None:
@@ -78,7 +76,6 @@ class HailoDetectionSource:
             )
 
         self._config = config
-        self._postprocess_so = postprocess_so
         self._vehicle_classes = set(config.vehicle_classes)
 
         self._pipeline: Any = None
@@ -155,8 +152,8 @@ class HailoDetectionSource:
             f"video/x-raw,width={cfg.frame_width},height={cfg.frame_height},"
             f"framerate={cfg.frame_fps}/1 ! "
             "videoconvert ! "
-            f"hailonet hef-path={cfg.detection_model_path} batch-size=1 ! "
-            f"hailofilter so-path={self._postprocess_so} qos=false ! "
+            f"hailonet hef-path={cfg.hef_path} batch-size=1 ! "
+            f"hailofilter so-path={cfg.hailofilter_so_path} qos=false ! "
             "hailotracker name=tracker keep-tracked-frames=10 keep-new-frames=10 ! "
             "fakesink name=speedtrap_sink sync=false async=false"
         )

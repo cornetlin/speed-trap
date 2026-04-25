@@ -3,7 +3,8 @@ camera_source: /dev/video0
 frame_width: 1920
 frame_height: 1080
 frame_fps: 30
-detection_model_path: models/yolov8n_vehicles.hef
+hef_path: models/yolov8n_vehicles.hef
+hailofilter_so_path: /usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so
 vehicle_classes:
   - car
   - truck

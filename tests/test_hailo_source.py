@@ -22,7 +22,10 @@ def _config() -> StationConfig:
         frame_width=1280,
         frame_height=720,
         frame_fps=30,
-        detection_model_path=Path("models/yolov8n.hef"),
+        hef_path=Path("models/yolov8n.hef"),
+        hailofilter_so_path=Path(
+            "/usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so"
+        ),
         vehicle_classes=("car", "truck"),
         trigger_line_y=0.7,
         mqtt_broker=None,

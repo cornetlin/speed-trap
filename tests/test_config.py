@@ -22,7 +22,8 @@ def test_load_config_full(tmp_path: Path) -> None:
         frame_width: 1920
         frame_height: 1080
         frame_fps: 30
-        detection_model_path: models/yolov8n.hef
+        hef_path: models/yolov8n.hef
+        hailofilter_so_path: /usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so
         vehicle_classes:
           - car
           - truck
@@ -40,7 +41,10 @@ def test_load_config_full(tmp_path: Path) -> None:
     assert cfg.frame_width == 1920
     assert cfg.frame_height == 1080
     assert cfg.frame_fps == 30
-    assert cfg.detection_model_path == Path("models/yolov8n.hef")
+    assert cfg.hef_path == Path("models/yolov8n.hef")
+    assert cfg.hailofilter_so_path == Path(
+        "/usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so"
+    )
     assert cfg.vehicle_classes == ("car", "truck")
     assert cfg.trigger_line_y == pytest.approx(0.7)
     assert cfg.mqtt_broker == "mqtt.local"
@@ -57,7 +61,8 @@ def test_load_config_optional_fields_default(tmp_path: Path) -> None:
         frame_width: 640
         frame_height: 480
         frame_fps: 15
-        detection_model_path: m.hef
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
         vehicle_classes: [car]
         trigger_line_y: 0.5
         mqtt_topic: speedtrap/b
@@ -80,7 +85,8 @@ def test_load_config_explicit_null_broker(tmp_path: Path) -> None:
         frame_width: 320
         frame_height: 240
         frame_fps: 10
-        detection_model_path: m.hef
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
         vehicle_classes: [car]
         trigger_line_y: 0.0
         mqtt_broker: null
@@ -107,7 +113,8 @@ def test_station_config_rejects_trigger_line_above_one() -> None:
             frame_width=640,
             frame_height=480,
             frame_fps=30,
-            detection_model_path=Path("m.hef"),
+            hef_path=Path("m.hef"),
+            hailofilter_so_path=Path("/tmp/dummy.so"),
             vehicle_classes=("car",),
             trigger_line_y=1.5,
             mqtt_broker=None,
@@ -124,7 +131,8 @@ def test_station_config_rejects_trigger_line_below_zero() -> None:
             frame_width=640,
             frame_height=480,
             frame_fps=30,
-            detection_model_path=Path("m.hef"),
+            hef_path=Path("m.hef"),
+            hailofilter_so_path=Path("/tmp/dummy.so"),
             vehicle_classes=("car",),
             trigger_line_y=-0.1,
             mqtt_broker=None,
@@ -141,7 +149,8 @@ def test_station_config_rejects_non_positive_frame_dims() -> None:
             frame_width=0,
             frame_height=480,
             frame_fps=30,
-            detection_model_path=Path("m.hef"),
+            hef_path=Path("m.hef"),
+            hailofilter_so_path=Path("/tmp/dummy.so"),
             vehicle_classes=("car",),
             trigger_line_y=0.5,
             mqtt_broker=None,
@@ -158,7 +167,8 @@ def test_station_config_rejects_non_positive_fps() -> None:
             frame_width=640,
             frame_height=480,
             frame_fps=0,
-            detection_model_path=Path("m.hef"),
+            hef_path=Path("m.hef"),
+            hailofilter_so_path=Path("/tmp/dummy.so"),
             vehicle_classes=("car",),
             trigger_line_y=0.5,
             mqtt_broker=None,
