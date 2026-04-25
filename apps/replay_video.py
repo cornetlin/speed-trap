@@ -43,6 +43,7 @@ def run_replay(
     if not capture.isOpened():
         raise FileNotFoundError(f"cannot open video: {video_path}")
 
+    display_delay_ms = max(1, int(1000 / max(1, config.frame_fps)))
     emitted: list[PassageEvent] = []
     frame_index = 0
     try:
@@ -75,7 +76,7 @@ def run_replay(
 
             if show_display:
                 cv2.imshow("speed-trap replay", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                if cv2.waitKey(display_delay_ms) & 0xFF == ord("q"):
                     break
 
             frame_index += 1
