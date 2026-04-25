@@ -1,27 +1,36 @@
 # speed-trap
 
-區間測速邊緣站軟體 — Raspberry Pi 5 + Hailo AI HAT+。
+校園區間測速 PoC — 在路口部署兩站邊緣裝置(A 站、B 站),
+透過車輛偵測 + 雙站時戳比對計算路段平均速度。
 
-開發與架構說明見 [CLAUDE.md](CLAUDE.md)。
+## 技術 stack
 
-## Sample video
+- **硬體**: Raspberry Pi 5 + Hailo-8 AI HAT+
+- **影像 / 偵測**: Picamera2、GStreamer、Hailo Python bindings
+- **核心邏輯**: Python 3.11+(純 Python,可單元測試)
+- **通訊**: MQTT(雙站共用 broker)
+- **品質**: pytest + mypy strict + ruff
 
-`samples/test_traffic.mp4` 用於 PC 上跑 `apps/replay_video.py` 驗證 pipeline。
-這支影片由以下公共領域素材切前 30 秒而成,並非 repo 的一部分(`samples/*.mp4` 已 gitignore),
-請各自下載重現:
+## 目錄結構
 
-- **來源**: [Why Do School Buses Still Look The Same — Internet Archive](https://archive.org/details/why-do-school-buses-still-look-the-same)
-- **License**: [CC0 1.0 Public Domain Dedication](https://creativecommons.org/publicdomain/zero/1.0/) — 任意使用,無需署名
-- **規格**: 640×360, ~30 fps, 30 秒, ~620 KB
+| 目錄 | 用途 |
+|---|---|
+| `speed_trap/` | 核心邏輯 package(tracker、trigger、event、config — 不依賴硬體) |
+| `apps/` | 執行入口:`replay_video`(PC 重放)、`run_station`(Pi 上線) |
+| `tests/` | pytest 測試 |
+| `config/` | 站點 YAML 設定 |
+| `scripts/` | 部署 / 啟動腳本 |
+| `samples/` | 離線測試影片(gitignored) |
+| `docs/` | 規劃與部署文件 |
 
-重新下載 + 切片:
+## 快速開始
 
-```bash
-curl -sL -o /tmp/_full.mp4 \
-  "https://archive.org/download/why-do-school-buses-still-look-the-same/Why%20Do%20School%20Buses%20Still%20Look%20The%20Same_.mp4"
-ffmpeg -y -ss 0 -t 30 -i /tmp/_full.mp4 -c:v copy -an samples/test_traffic.mp4
-rm /tmp/_full.mp4
-```
+| 我想做的事 | 看哪份文件 |
+|---|---|
+| 在 PC 上 clone 後開始改 code、跑 pytest | [CLAUDE.md](CLAUDE.md) |
+| 把這個 repo 部署到一台 Pi 上跑起來 | [docs/pi-setup-simple.md](docs/pi-setup-simple.md) |
+| 看整體 6 週驗證規劃與里程碑 | [docs/6week-roadmap.md](docs/6week-roadmap.md) |
 
-`MockDetector` 不看影片內容(它產生的是固定軌跡的假車),所以任何 mp4 都能跑;
-這支只是給人看一個會動的背景而已。
+## License
+
+[MIT](LICENSE) — 可任意使用、修改、再散布,保留版權聲明即可。
