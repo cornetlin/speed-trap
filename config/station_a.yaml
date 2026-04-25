@@ -1,0 +1,15 @@
+station_id: station_a
+camera_source: /dev/video0
+frame_width: 1920
+frame_height: 1080
+frame_fps: 30
+detection_model_path: models/yolov8n_vehicles.hef
+vehicle_classes:
+  - car
+  - truck
+  - bus
+  - motorcycle
+trigger_line_y: 0.7
+mqtt_broker: null
+mqtt_topic: speedtrap/station_a/passage
+log_level: INFO
