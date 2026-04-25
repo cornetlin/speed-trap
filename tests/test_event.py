@@ -63,7 +63,7 @@ def test_passage_event_to_json_roundtrips() -> None:
 def test_passage_event_to_json_keys_sorted() -> None:
     event = _event()
     text = event.to_json()
-    keys = [k for k in json.loads(text).keys()]
+    keys = list(json.loads(text))
     assert keys == sorted(keys)
 
 
