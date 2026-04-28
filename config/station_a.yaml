@@ -3,8 +3,10 @@ camera_source: /dev/video0
 frame_width: 1920
 frame_height: 1080
 frame_fps: 30
-hef_path: models/yolov8n_vehicles.hef
-hailofilter_so_path: /usr/lib/hailo-post-processes/libyolo_hailortpp_postprocess.so
+# Hailo-8L 預設(Pi 5 + AI HAT+,hailo-models / hailo-tappas-core apt 套件提供)
+# 換不同 HEF 時 hailofilter_so_path 也要對應換(libyolo_hailortpp_post.so 通用 v6/v8)
+hef_path: /usr/share/hailo-models/yolov6n_h8l.hef
+hailofilter_so_path: /usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so
 vehicle_classes:
   - car
   - truck
