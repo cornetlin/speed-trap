@@ -151,22 +151,22 @@ class HailoDetectionSource:
         # + pisp ISP picks a sensor-native mode (e.g. IMX708 emits 2304x1296),
         # then videoconvert + videoscale step it down to the HEF's input shape.
         #
-        # videoscale add-borders=true + pixel-aspect-ratio=1/1 LETTERBOXES the
-        # 16:9-ish input into the 1:1 hailonet target instead of squishing it
-        # (cars looked unnaturally tall+narrow before, hurting recall on small
-        # / distorted objects). With letterboxing the bbox y-coords returned
-        # by hailonet are shifted slightly (black bars at top+bottom occupy
-        # ~8% each for a 1280x1080 input), so trigger_line_y in YAML may need
-        # a small downward tweak after this change to land on the same scene
-        # location.
+        # We use plain `videoscale` (squish) rather than `add-borders=true`
+        # (letterbox). Letterbox is "theoretically" the right thing — it
+        # preserves aspect ratio for the detector — but on the camera-of-screen
+        # YouTube test it dropped recall from 62% / 36% to ~10% because
+        # fitting 1280x1080 -> 640x540 inside a 640x640 canvas leaves only
+        # ~84% of pixel rows for actual content; small/far cars hit the
+        # detection threshold floor. Squish keeps more pixels per object at
+        # the cost of unnatural aspect, which YOLO tolerates well.
+        # When we move to real lamppost deployment (cars larger in frame),
+        # revisit add-borders=true + pixel-aspect-ratio=1/1.
         # YOLOv6n / YOLOv8s / YOLOX-s on Hailo-8(L) all expect 640x640 RGB.
-        hailo_input = (
-            "video/x-raw,format=RGB,width=640,height=640,pixel-aspect-ratio=1/1"
-        )
+        hailo_input = "video/x-raw,format=RGB,width=640,height=640"
         return (
             "libcamerasrc ! "
             "videoconvert ! "
-            "videoscale add-borders=true ! "
+            "videoscale ! "
             f"{hailo_input} ! "
             f"hailonet hef-path={cfg.hef_path} batch-size=1 ! "
             f"hailofilter so-path={cfg.hailofilter_so_path} qos=false ! "
