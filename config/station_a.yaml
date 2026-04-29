@@ -7,7 +7,7 @@ frame_fps: 30
 # 用 _h8 後綴對應 Hailo-8 晶片(AI HAT+ 26 TOPS),用 _h8l 對應 Hailo-8L(13 TOPS)。
 # 跑錯版本仍能執行但 HailoRT 會發 warning + 效能下降。`hailortcli scan` 看晶片型號。
 # 換不同 HEF 時 hailofilter_so_path 不用改(libyolo_hailortpp_post.so 通用 v6/v8)
-hef_path: /usr/share/hailo-models/yolov6n_h8.hef
+hef_path: /usr/share/hailo-models/yolov8s_h8.hef
 hailofilter_so_path: /usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so
 vehicle_classes:
   - car
