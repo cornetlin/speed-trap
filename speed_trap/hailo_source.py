@@ -147,16 +147,17 @@ class HailoDetectionSource:
 
     def _build_pipeline_str(self) -> str:
         cfg = self._config
-        # hailonet needs caps that match the HEF's input tensor exactly. YOLOv6n /
-        # YOLOv8s / YOLOX-s on Hailo-8L all expect 640x640 RGB, so squish the
-        # camera frame down with videoscale + lock format=RGB before hailonet.
-        # If we ever ship a HEF with a different input size, lift these into
+        # Don't pin width/height/framerate after libcamerasrc — Pi 5's libcamera
+        # + pisp ISP picks a sensor-native mode (e.g. IMX708 emits 2304x1296),
+        # then videoconvert + videoscale step it down to the HEF's input shape.
+        # Forcing 1920x1080 here makes negotiation fail with not-negotiated(-4)
+        # because the ISP can't always satisfy arbitrary downscale targets.
+        # YOLOv6n / YOLOv8s / YOLOX-s on Hailo-8(L) all expect 640x640 RGB; if
+        # we later ship a HEF with a different input size, lift these into
         # StationConfig (hailo_input_width/height).
         hailo_input = "video/x-raw,format=RGB,width=640,height=640"
         return (
             "libcamerasrc ! "
-            f"video/x-raw,width={cfg.frame_width},height={cfg.frame_height},"
-            f"framerate={cfg.frame_fps}/1 ! "
             "videoconvert ! "
             "videoscale ! "
             f"{hailo_input} ! "
