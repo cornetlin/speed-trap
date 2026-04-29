@@ -150,16 +150,23 @@ class HailoDetectionSource:
         # Don't pin width/height/framerate after libcamerasrc — Pi 5's libcamera
         # + pisp ISP picks a sensor-native mode (e.g. IMX708 emits 2304x1296),
         # then videoconvert + videoscale step it down to the HEF's input shape.
-        # Forcing 1920x1080 here makes negotiation fail with not-negotiated(-4)
-        # because the ISP can't always satisfy arbitrary downscale targets.
-        # YOLOv6n / YOLOv8s / YOLOX-s on Hailo-8(L) all expect 640x640 RGB; if
-        # we later ship a HEF with a different input size, lift these into
-        # StationConfig (hailo_input_width/height).
-        hailo_input = "video/x-raw,format=RGB,width=640,height=640"
+        #
+        # videoscale add-borders=true + pixel-aspect-ratio=1/1 LETTERBOXES the
+        # 16:9-ish input into the 1:1 hailonet target instead of squishing it
+        # (cars looked unnaturally tall+narrow before, hurting recall on small
+        # / distorted objects). With letterboxing the bbox y-coords returned
+        # by hailonet are shifted slightly (black bars at top+bottom occupy
+        # ~8% each for a 1280x1080 input), so trigger_line_y in YAML may need
+        # a small downward tweak after this change to land on the same scene
+        # location.
+        # YOLOv6n / YOLOv8s / YOLOX-s on Hailo-8(L) all expect 640x640 RGB.
+        hailo_input = (
+            "video/x-raw,format=RGB,width=640,height=640,pixel-aspect-ratio=1/1"
+        )
         return (
             "libcamerasrc ! "
             "videoconvert ! "
-            "videoscale ! "
+            "videoscale add-borders=true ! "
             f"{hailo_input} ! "
             f"hailonet hef-path={cfg.hef_path} batch-size=1 ! "
             f"hailofilter so-path={cfg.hailofilter_so_path} qos=false ! "
