@@ -126,9 +126,31 @@ class PlateRecognizer:
             return None
 
         # Normalise result shape across fast-plate-ocr versions:
-        #   list[tuple[str, float]] | list[str] | str
+        #   - newer (>= 0.5): list[PlatePrediction(plate=str, char_probs=list|None,
+        #                                          region=..., region_prob=...)]
+        #   - older: list[tuple[str, float]]
+        #   - oldest: list[str]
         first = results[0] if isinstance(results, list) else results
-        if isinstance(first, tuple) and len(first) >= 2:
+
+        if hasattr(first, "plate"):
+            raw_text = str(first.plate)
+            # Try a few ways to extract confidence; fall back to 1.0 if the
+            # model doesn't surface character or region probabilities.
+            char_probs = getattr(first, "char_probs", None)
+            region_prob = getattr(first, "region_prob", None)
+            if char_probs:
+                try:
+                    confidence = float(sum(char_probs) / len(char_probs))
+                except (TypeError, ZeroDivisionError):
+                    confidence = 1.0
+            elif region_prob is not None:
+                try:
+                    confidence = float(region_prob)
+                except (TypeError, ValueError):
+                    confidence = 1.0
+            else:
+                confidence = 1.0
+        elif isinstance(first, tuple) and len(first) >= 2:
             raw_text = str(first[0])
             confidence = float(first[1])
         elif isinstance(first, str):
