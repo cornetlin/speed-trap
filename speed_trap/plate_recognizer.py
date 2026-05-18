@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
+from speed_trap.config import StationConfig
 from speed_trap.plate_format import is_valid_taiwan_plate, normalize_plate
 
 _logger = logging.getLogger(__name__)
@@ -48,6 +49,47 @@ except Exception as exc:  # pragma: no cover - depends on env
 DEFAULT_MODEL = "global-plates-mobile-vit-v2-model"
 
 
+def _preprocess_for_ocr(jpeg_bytes: bytes) -> bytes:
+    """Apply CLAHE (adaptive histogram equalization) + sharpening before OCR.
+
+    Phase A experiment: many "OCR misreads" come from low-contrast or slightly
+    blurry plate crops. CLAHE recovers contrast in shadowed plates; a small
+    unsharp-mask helps the OCR see character edges more clearly.
+
+    Returns a new JPEG with the same shape. If decoding fails (corrupt input),
+    we return the original bytes unchanged so the caller can still attempt OCR.
+    """
+    if _IMPORT_ERROR is not None or not jpeg_bytes:
+        return jpeg_bytes
+    try:
+        nparr = _np.frombuffer(jpeg_bytes, _np.uint8)
+        img_bgr = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            return jpeg_bytes
+
+        # CLAHE on the luminance channel only (preserves colour distribution)
+        lab = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2LAB)
+        l_channel, a, b = _cv2.split(lab)
+        clahe = _cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l_channel)
+        lab_eq = _cv2.merge((l_clahe, a, b))
+        img_eq = _cv2.cvtColor(lab_eq, _cv2.COLOR_LAB2BGR)
+
+        # Light unsharp mask
+        blur = _cv2.GaussianBlur(img_eq, (0, 0), sigmaX=1.0)
+        img_sharp = _cv2.addWeighted(img_eq, 1.4, blur, -0.4, 0)
+
+        ok, jpeg = _cv2.imencode(
+            ".jpg", img_sharp, [int(_cv2.IMWRITE_JPEG_QUALITY), 95]
+        )
+        if ok:
+            return bytes(jpeg)
+        return jpeg_bytes
+    except Exception as exc:  # pragma: no cover - opencv glitches
+        _logger.warning("preprocessing failed: %s", exc)
+        return jpeg_bytes
+
+
 @dataclass(frozen=True)
 class PlateReading:
     text: str           # canonicalised, uppercase, no spaces/hyphens
@@ -60,7 +102,12 @@ class PlateRecognizer:
     """Wraps fast-plate-ocr. Single instance, thread-safe enough for our use
     (only called from the consumer loop on trigger, not per-frame)."""
 
-    def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL,
+        *,
+        preprocess: bool = False,
+    ) -> None:
         if _IMPORT_ERROR is not None:
             raise RuntimeError(
                 "PlateRecognizer dependencies missing: "
@@ -69,7 +116,11 @@ class PlateRecognizer:
         # First instantiation triggers a ~10MB model download to ~/.cache/
         self._lpr = _LicensePlateRecognizer(model_name)
         self._model_name = model_name
-        _logger.info("PlateRecognizer initialised with model=%s", model_name)
+        self._preprocess = preprocess
+        _logger.info(
+            "PlateRecognizer initialised with model=%s preprocess=%s",
+            model_name, preprocess,
+        )
 
     @property
     def model_name(self) -> str:
@@ -89,11 +140,13 @@ class PlateRecognizer:
         if not jpeg_bytes:
             return None
 
+        payload = _preprocess_for_ocr(jpeg_bytes) if self._preprocess else jpeg_bytes
+
         # tempfile path on Pi is /tmp which is tmpfs (RAM) on most distros,
         # so the round-trip is basically a memcpy + ONNX inference.
         fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_plate_")
         try:
-            os.write(fd, jpeg_bytes)
+            os.write(fd, payload)
             os.close(fd)
             return self._read_path(tmp_path)
         finally:
@@ -186,3 +239,47 @@ class NoopPlateRecognizer:
 
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
         return None
+
+
+def make_recognizer(config: StationConfig) -> Any:
+    """Build the OCR backend chosen by the station YAML.
+
+    Falls back to NoopPlateRecognizer with a warning if the requested
+    backend's dependencies aren't installed — keeps the station running
+    even if a Pi is missing the optional OCR libraries, so vehicle
+    detection still works and operators can see "no OCR" in the events.
+    """
+    backend = config.ocr_backend.lower()
+
+    if backend == "noop":
+        _logger.info("OCR backend: noop (disabled by config)")
+        return NoopPlateRecognizer()
+
+    if backend == "fast-plate-ocr":
+        try:
+            return PlateRecognizer(
+                model_name=config.ocr_model_name,
+                preprocess=config.ocr_preprocess,
+            )
+        except RuntimeError as exc:
+            _logger.warning(
+                "fast-plate-ocr unavailable, falling back to noop: %s", exc
+            )
+            return NoopPlateRecognizer()
+
+    if backend == "paddleocr":
+        # Lazy import — keeps PC dev / fast-plate-ocr-only deployments from
+        # paying the cost of importing paddle at module load time.
+        try:
+            from speed_trap.paddle_recognizer import PaddleOCRRecognizer
+
+            return PaddleOCRRecognizer(preprocess=config.ocr_preprocess)
+        except RuntimeError as exc:
+            _logger.warning(
+                "paddleocr unavailable, falling back to noop: %s", exc
+            )
+            return NoopPlateRecognizer()
+
+    # Should be unreachable thanks to config validation, but be defensive
+    _logger.warning("unknown ocr_backend %r, using noop", backend)
+    return NoopPlateRecognizer()

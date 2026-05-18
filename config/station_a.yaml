@@ -18,3 +18,21 @@ trigger_line_y: 0.7
 mqtt_broker: null
 mqtt_topic: speedtrap/station_a/passage
 log_level: INFO
+
+# === Phase A — Plate OCR experiments ===
+# 切換 OCR backend / 模型 / 前處理,不用改 code,改 YAML 即可
+#
+# ocr_backend:
+#   "fast-plate-ocr"  → 預設,輕量 ONNX 模型(~10 MB),Pi CPU 10-30 ms
+#   "paddleocr"       → PaddleOCR(~150 MB),中文系強;需 pip install paddleocr
+#   "noop"            → 完全關閉 OCR(只跑車輛偵測,passage 事件無 plate_text)
+#
+# ocr_model_name (僅 fast-plate-ocr 有效;PaddleOCR 用 ocr_backend 切):
+#   "global-plates-mobile-vit-v2-model"     → 全球(目前預設,對台灣弱)
+#   "european-plates-mobile-vit-v2-model"   → 歐洲(字符集相近,值得試)
+#   "cct-xs-v1-global-model"                → 新版 CCT 架構
+#
+# ocr_preprocess: true 會在 OCR 前做 CLAHE 對比增強 + unsharp,可能救回低對比車牌
+ocr_backend: fast-plate-ocr
+ocr_model_name: global-plates-mobile-vit-v2-model
+ocr_preprocess: false

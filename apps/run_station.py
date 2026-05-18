@@ -27,7 +27,7 @@ from speed_trap.hailo_source import HailoDetectionSource
 from speed_trap.plate_recognizer import (
     NoopPlateRecognizer,
     PlateReading,
-    PlateRecognizer,
+    make_recognizer,
 )
 from speed_trap.tracker import VehicleTracker
 from speed_trap.trigger_line import TriggerLineDetector
@@ -52,16 +52,9 @@ def _hash_image(frame_jpeg: bytes | None) -> str:
     return hashlib.sha256(frame_jpeg).hexdigest()
 
 
-def _build_recognizer() -> _PlateRecognizerLike:
-    """Instantiate a real PlateRecognizer if fast-plate-ocr is available,
-    otherwise fall back to NoopPlateRecognizer so the station still runs."""
-    try:
-        return PlateRecognizer()
-    except RuntimeError as exc:
-        _logger.warning(
-            "fast-plate-ocr unavailable, falling back to no-op OCR: %s", exc
-        )
-        return NoopPlateRecognizer()
+# Recognizer construction now lives in speed_trap.plate_recognizer.make_recognizer
+# so the YAML's ocr_backend / ocr_model_name / ocr_preprocess fields drive
+# which OCR backend gets used without any code changes in apps/.
 
 
 class _StopFlag:
@@ -165,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sink = make_sink(config)
     source = HailoDetectionSource(config)
-    recognizer = _build_recognizer()
+    recognizer = make_recognizer(config)
     stop_flag = _StopFlag()
 
     def _handle_signal(signum: int, _frame: FrameType | None) -> None:

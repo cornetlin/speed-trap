@@ -184,3 +184,92 @@ def test_load_sample_station_a_yaml() -> None:
     assert cfg.station_id == "station_a"
     assert "car" in cfg.vehicle_classes
     assert cfg.mqtt_broker is None
+
+
+# ─── OCR config (Phase A) ──────────────────────────────────────────────
+
+
+def test_ocr_fields_default_to_fast_plate_ocr(tmp_path: Path) -> None:
+    """Existing YAMLs without ocr_* keys keep the W3 behaviour."""
+    yaml_path = _write_yaml(
+        tmp_path,
+        """
+        station_id: x
+        camera_source: cam
+        frame_width: 640
+        frame_height: 480
+        frame_fps: 30
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
+        vehicle_classes: [car]
+        trigger_line_y: 0.5
+        mqtt_topic: t
+        """,
+    )
+    cfg = load_config(yaml_path)
+    assert cfg.ocr_backend == "fast-plate-ocr"
+    assert cfg.ocr_model_name == "global-plates-mobile-vit-v2-model"
+    assert cfg.ocr_preprocess is False
+
+
+def test_load_config_ocr_fields_set(tmp_path: Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path,
+        """
+        station_id: x
+        camera_source: cam
+        frame_width: 640
+        frame_height: 480
+        frame_fps: 30
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
+        vehicle_classes: [car]
+        trigger_line_y: 0.5
+        mqtt_topic: t
+        ocr_backend: paddleocr
+        ocr_model_name: european-plates-mobile-vit-v2-model
+        ocr_preprocess: true
+        """,
+    )
+    cfg = load_config(yaml_path)
+    assert cfg.ocr_backend == "paddleocr"
+    assert cfg.ocr_model_name == "european-plates-mobile-vit-v2-model"
+    assert cfg.ocr_preprocess is True
+
+
+def test_invalid_ocr_backend_rejected() -> None:
+    with pytest.raises(ValueError, match="ocr_backend"):
+        StationConfig(
+            station_id="x",
+            camera_source="cam",
+            frame_width=640,
+            frame_height=480,
+            frame_fps=30,
+            hef_path=Path("m.hef"),
+            hailofilter_so_path=Path("/tmp/dummy.so"),
+            vehicle_classes=("car",),
+            trigger_line_y=0.5,
+            mqtt_broker=None,
+            mqtt_topic="t",
+            log_level="INFO",
+            ocr_backend="not-a-real-backend",
+        )
+
+
+def test_ocr_backend_noop_accepted() -> None:
+    cfg = StationConfig(
+        station_id="x",
+        camera_source="cam",
+        frame_width=640,
+        frame_height=480,
+        frame_fps=30,
+        hef_path=Path("m.hef"),
+        hailofilter_so_path=Path("/tmp/dummy.so"),
+        vehicle_classes=("car",),
+        trigger_line_y=0.5,
+        mqtt_broker=None,
+        mqtt_topic="t",
+        log_level="INFO",
+        ocr_backend="noop",
+    )
+    assert cfg.ocr_backend == "noop"

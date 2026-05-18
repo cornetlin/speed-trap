@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+_VALID_OCR_BACKENDS = frozenset({"fast-plate-ocr", "paddleocr", "noop"})
+
 
 @dataclass(frozen=True)
 class StationConfig:
@@ -20,6 +22,10 @@ class StationConfig:
     mqtt_broker: str | None
     mqtt_topic: str
     log_level: str
+    # OCR configuration (Phase A — swap backends without code changes)
+    ocr_backend: str = "fast-plate-ocr"        # "fast-plate-ocr" | "paddleocr" | "noop"
+    ocr_model_name: str = "global-plates-mobile-vit-v2-model"  # fast-plate-ocr model variant
+    ocr_preprocess: bool = False               # apply CLAHE + sharpen before OCR
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.trigger_line_y <= 1.0:
@@ -30,6 +36,11 @@ class StationConfig:
             raise ValueError("frame_width and frame_height must be positive")
         if self.frame_fps <= 0:
             raise ValueError("frame_fps must be positive")
+        if self.ocr_backend not in _VALID_OCR_BACKENDS:
+            raise ValueError(
+                f"ocr_backend must be one of {sorted(_VALID_OCR_BACKENDS)}, "
+                f"got {self.ocr_backend!r}"
+            )
 
 
 def load_config(path: Path) -> StationConfig:
@@ -50,4 +61,9 @@ def load_config(path: Path) -> StationConfig:
         mqtt_broker=data.get("mqtt_broker"),
         mqtt_topic=str(data["mqtt_topic"]),
         log_level=str(data.get("log_level", "INFO")),
+        ocr_backend=str(data.get("ocr_backend", "fast-plate-ocr")),
+        ocr_model_name=str(
+            data.get("ocr_model_name", "global-plates-mobile-vit-v2-model")
+        ),
+        ocr_preprocess=bool(data.get("ocr_preprocess", False)),
     )

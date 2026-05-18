@@ -7,9 +7,12 @@ guard. Pi-side end-to-end testing happens in the field manual, not pytest.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from speed_trap import plate_recognizer as pr
+from speed_trap.config import StationConfig
 from speed_trap.plate_recognizer import NoopPlateRecognizer, PlateReading
 
 
@@ -148,3 +151,86 @@ def test_results_to_reading_unknown_shape_logs_warning(
     with caplog.at_level(_log.WARNING):
         assert pr.PlateRecognizer._results_to_reading([{"unexpected": "dict"}]) is None
     assert any("unexpected" in r.message for r in caplog.records)
+
+
+# ─── make_recognizer factory (Phase A) ─────────────────────────────────
+
+
+def _config(
+    *,
+    ocr_backend: str = "fast-plate-ocr",
+    ocr_model_name: str = "global-plates-mobile-vit-v2-model",
+    ocr_preprocess: bool = False,
+) -> StationConfig:
+    return StationConfig(
+        station_id="x",
+        camera_source="cam",
+        frame_width=640,
+        frame_height=480,
+        frame_fps=30,
+        hef_path=Path("m.hef"),
+        hailofilter_so_path=Path("/tmp/dummy.so"),
+        vehicle_classes=("car",),
+        trigger_line_y=0.5,
+        mqtt_broker=None,
+        mqtt_topic="t",
+        log_level="INFO",
+        ocr_backend=ocr_backend,
+        ocr_model_name=ocr_model_name,
+        ocr_preprocess=ocr_preprocess,
+    )
+
+
+def test_make_recognizer_noop_backend() -> None:
+    rec = pr.make_recognizer(_config(ocr_backend="noop"))
+    assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_make_recognizer_fast_plate_ocr_falls_back_when_missing() -> None:
+    """If fast-plate-ocr isn't installed on the dev machine, factory
+    falls back to NoopPlateRecognizer (with a warning) instead of crashing."""
+    if pr._IMPORT_ERROR is None:
+        pytest.skip("fast-plate-ocr is installed; can't test the missing-deps path")
+    rec = pr.make_recognizer(_config(ocr_backend="fast-plate-ocr"))
+    assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_make_recognizer_paddleocr_falls_back_when_missing() -> None:
+    """Same fallback story for paddleocr backend."""
+    try:
+        from speed_trap.paddle_recognizer import _IMPORT_ERROR as _paddle_err
+    except ImportError:
+        pytest.skip("paddle_recognizer module not importable on this machine")
+    if _paddle_err is None:
+        pytest.skip("paddleocr is installed; can't test the missing-deps path")
+    rec = pr.make_recognizer(_config(ocr_backend="paddleocr"))
+    assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_make_recognizer_unknown_backend_returns_noop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defensive: config validation should catch unknown backends, but if a
+    test somehow bypasses validation the factory still returns Noop."""
+    # We can't construct StationConfig with an invalid backend (it raises),
+    # so use a SimpleNamespace stand-in.
+    from types import SimpleNamespace
+
+    fake_config = SimpleNamespace(
+        ocr_backend="surprise",
+        ocr_model_name="x",
+        ocr_preprocess=False,
+    )
+    rec = pr.make_recognizer(fake_config)  # type: ignore[arg-type]
+    assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_preprocess_helper_handles_empty_bytes() -> None:
+    """Phase A preprocessing should be a no-op for empty input."""
+    assert pr._preprocess_for_ocr(b"") == b""
+
+
+def test_preprocess_helper_handles_invalid_jpeg() -> None:
+    """Corrupt input should be returned unchanged, not crash."""
+    out = pr._preprocess_for_ocr(b"not a real jpeg")
+    assert out == b"not a real jpeg"
