@@ -144,10 +144,13 @@ def test_make_sink_returns_console_when_broker_empty_string() -> None:
 
 
 def test_passage_event_includes_plate_fields_when_set() -> None:
-    event = _event(plate_text="ABC1234", plate_confidence=0.93)
+    event = _event(
+        plate_text="ABC1234", plate_confidence=0.93, plate_is_taiwan_format=True
+    )
     decoded = json.loads(event.to_json())
     assert decoded["plate_text"] == "ABC1234"
     assert decoded["plate_confidence"] == pytest.approx(0.93)
+    assert decoded["plate_is_taiwan_format"] is True
 
 
 def test_passage_event_plate_fields_default_to_none() -> None:
@@ -155,17 +158,38 @@ def test_passage_event_plate_fields_default_to_none() -> None:
     decoded = json.loads(event.to_json())
     assert decoded["plate_text"] is None
     assert decoded["plate_confidence"] is None
+    assert decoded["plate_is_taiwan_format"] is None
+
+
+def test_passage_event_taiwan_format_false_serialises() -> None:
+    """When OCR reads something but it doesn't match Taiwan format,
+    plate_is_taiwan_format=False must survive JSON round-trip."""
+    event = _event(plate_text="A46512", plate_is_taiwan_format=False)
+    decoded = json.loads(event.to_json())
+    assert decoded["plate_text"] == "A46512"
+    assert decoded["plate_is_taiwan_format"] is False
 
 
 def test_sqlite_sink_persists_plate_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "events.db"
     sink = SQLiteEventSink(db_path)
-    sink.emit(_event(track_id=1, plate_text="ABC1234", plate_confidence=0.88))
+    sink.emit(
+        _event(
+            track_id=1,
+            plate_text="ABC1234",
+            plate_confidence=0.88,
+            plate_is_taiwan_format=True,
+        )
+    )
     sink.emit(_event(track_id=2))  # no plate
     sink.close()
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT track_id, plate_text, plate_confidence FROM events ORDER BY track_id"
+            "SELECT track_id, plate_text, plate_confidence, plate_is_taiwan_format "
+            "FROM events ORDER BY track_id"
         ).fetchall()
-    assert rows == [(1, "ABC1234", pytest.approx(0.88)), (2, None, None)]
+    assert rows == [
+        (1, "ABC1234", pytest.approx(0.88), 1),
+        (2, None, None, None),
+    ]

@@ -120,17 +120,20 @@ def run_station(
                     image_sha256=_hash_image(best.frame_jpeg),
                     plate_text=reading.text if reading else None,
                     plate_confidence=reading.confidence if reading else None,
+                    plate_is_taiwan_format=reading.is_taiwan_format if reading else None,
                 )
                 sink.emit(event)
                 trigger.mark_triggered(det.track_id)
                 emitted += 1
                 _logger.info(
-                    "passage emitted: track=%d label=%s conf=%.2f plate=%s plate_conf=%s",
+                    "passage emitted: track=%d label=%s conf=%.2f "
+                    "plate=%s plate_conf=%s tw_format=%s",
                     det.track_id,
                     det.label,
                     det.confidence,
                     event.plate_text or "-",
                     f"{event.plate_confidence:.2f}" if event.plate_confidence else "-",
+                    event.plate_is_taiwan_format,
                 )
 
             now_ns = time.monotonic_ns()
