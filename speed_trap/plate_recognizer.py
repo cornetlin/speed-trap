@@ -16,7 +16,10 @@ try/except so that:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -73,39 +76,64 @@ class PlateRecognizer:
         return self._model_name
 
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
-        """Decode JPEG bytes -> RGB ndarray -> OCR. Returns None if no plate
-        could be read (no detection or empty string)."""
+        """Run OCR on JPEG bytes. Returns None if no plate could be read.
+
+        fast-plate-ocr models expect grayscale input at a model-specific
+        resolution (e.g. 70x140 for global-plates-mobile-vit-v2-model).
+        Passing a numpy RGB array fails with
+            Got invalid dimensions: index 3 Got: 3 Expected: 1
+        Easiest path: write the JPEG to a temp file and let ``run(path)``
+        do its own preprocessing — works across all fast-plate-ocr model
+        variants without us hard-coding their input shape.
+        """
         if not jpeg_bytes:
             return None
 
-        nparr = _np.frombuffer(jpeg_bytes, _np.uint8)
-        img_bgr = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
-        if img_bgr is None:
-            _logger.warning("failed to decode JPEG (%d bytes)", len(jpeg_bytes))
-            return None
-
-        img_rgb = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2RGB)
-        return self._read_array(img_rgb)
-
-    def _read_array(self, img_rgb: Any) -> PlateReading | None:
-        # fast-plate-ocr API varies slightly across versions; handle both shapes
+        # tempfile path on Pi is /tmp which is tmpfs (RAM) on most distros,
+        # so the round-trip is basically a memcpy + ONNX inference.
+        fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_plate_")
         try:
-            results = self._lpr.run(img_rgb)
+            os.write(fd, jpeg_bytes)
+            os.close(fd)
+            return self._read_path(tmp_path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+
+    def _read_path(self, image_path: str) -> PlateReading | None:
+        try:
+            results = self._lpr.run(image_path)
         except Exception as exc:
             _logger.warning("fast-plate-ocr failed: %s", exc)
             return None
 
+        return self._results_to_reading(results)
+
+    def _read_array(self, image: Any) -> PlateReading | None:
+        """Run OCR on a pre-decoded ndarray. Caller is responsible for the
+        shape/format matching the loaded model. Use ``read_from_jpeg`` if
+        you don't want to think about that."""
+        try:
+            results = self._lpr.run(image)
+        except Exception as exc:
+            _logger.warning("fast-plate-ocr failed: %s", exc)
+            return None
+        return self._results_to_reading(results)
+
+    @staticmethod
+    def _results_to_reading(results: Any) -> PlateReading | None:
         if not results:
             return None
 
-        # Normalise result shape: list[tuple[str, float]] OR list[str] OR str
-        first = results[0]
+        # Normalise result shape across fast-plate-ocr versions:
+        #   list[tuple[str, float]] | list[str] | str
+        first = results[0] if isinstance(results, list) else results
         if isinstance(first, tuple) and len(first) >= 2:
             raw_text = str(first[0])
             confidence = float(first[1])
         elif isinstance(first, str):
             raw_text = first
-            confidence = 1.0  # fast-plate-ocr versions without confidence
+            confidence = 1.0
         else:
             _logger.warning("unexpected fast-plate-ocr result shape: %r", results)
             return None
