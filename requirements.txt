@@ -2,3 +2,4 @@ paho-mqtt
 numpy
 opencv-python-headless
 pyyaml
+fast-plate-ocr

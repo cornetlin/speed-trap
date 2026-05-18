@@ -141,3 +141,31 @@ def test_make_sink_returns_console_when_broker_none() -> None:
 def test_make_sink_returns_console_when_broker_empty_string() -> None:
     sink = make_sink(_config(broker=""))
     assert isinstance(sink, ConsoleEventSink)
+
+
+def test_passage_event_includes_plate_fields_when_set() -> None:
+    event = _event(plate_text="ABC1234", plate_confidence=0.93)
+    decoded = json.loads(event.to_json())
+    assert decoded["plate_text"] == "ABC1234"
+    assert decoded["plate_confidence"] == pytest.approx(0.93)
+
+
+def test_passage_event_plate_fields_default_to_none() -> None:
+    event = _event()
+    decoded = json.loads(event.to_json())
+    assert decoded["plate_text"] is None
+    assert decoded["plate_confidence"] is None
+
+
+def test_sqlite_sink_persists_plate_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "events.db"
+    sink = SQLiteEventSink(db_path)
+    sink.emit(_event(track_id=1, plate_text="ABC1234", plate_confidence=0.88))
+    sink.emit(_event(track_id=2))  # no plate
+    sink.close()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT track_id, plate_text, plate_confidence FROM events ORDER BY track_id"
+        ).fetchall()
+    assert rows == [(1, "ABC1234", pytest.approx(0.88)), (2, None, None)]

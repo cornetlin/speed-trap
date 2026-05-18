@@ -20,6 +20,8 @@ class PassageEvent:
     timestamp_ns: int
     confidence: float
     image_sha256: str
+    plate_text: str | None = None
+    plate_confidence: float | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -44,12 +46,14 @@ class ConsoleEventSink(EventSink):
 class SQLiteEventSink(EventSink):
     _SCHEMA = """
         CREATE TABLE IF NOT EXISTS events (
-            station_id   TEXT    NOT NULL,
-            track_id     INTEGER NOT NULL,
-            label        TEXT    NOT NULL,
-            timestamp_ns INTEGER NOT NULL,
-            confidence   REAL    NOT NULL,
-            image_sha256 TEXT    NOT NULL
+            station_id       TEXT    NOT NULL,
+            track_id         INTEGER NOT NULL,
+            label            TEXT    NOT NULL,
+            timestamp_ns     INTEGER NOT NULL,
+            confidence       REAL    NOT NULL,
+            image_sha256     TEXT    NOT NULL,
+            plate_text       TEXT,
+            plate_confidence REAL
         )
     """
 
@@ -60,7 +64,7 @@ class SQLiteEventSink(EventSink):
 
     def emit(self, event: PassageEvent) -> None:
         self._conn.execute(
-            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.station_id,
                 event.track_id,
@@ -68,6 +72,8 @@ class SQLiteEventSink(EventSink):
                 event.timestamp_ns,
                 event.confidence,
                 event.image_sha256,
+                event.plate_text,
+                event.plate_confidence,
             ),
         )
         self._conn.commit()
