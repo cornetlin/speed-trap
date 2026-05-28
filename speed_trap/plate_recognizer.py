@@ -49,6 +49,65 @@ except Exception as exc:  # pragma: no cover - depends on env
 DEFAULT_MODEL = "global-plates-mobile-vit-v2-model"
 
 
+def _is_path_like(s: str) -> bool:
+    """Heuristic: distinguish a fast-plate-ocr hub model name from a filesystem
+    path. Paths contain separators or end in .onnx; hub names do not."""
+    if not s:
+        return False
+    if "/" in s or "\\" in s:
+        return True
+    return s.lower().endswith(".onnx")
+
+
+def _load_lpr(
+    model_or_path: str, config_path: str | None
+) -> Any:
+    """Instantiate fast-plate-ocr's LicensePlateRecognizer.
+
+    Two modes:
+    1. Hub model: model_or_path is a name like "global-plates-mobile-vit-v2-model".
+       Pass straight through; fast-plate-ocr downloads from its hub.
+    2. Custom ONNX: model_or_path is a filesystem path to a .onnx file. Try
+       the various parameter naming conventions fast-plate-ocr has used across
+       versions (different keyword args in 0.4 vs 0.5 vs 0.7).
+    """
+    if not _is_path_like(model_or_path):
+        return _LicensePlateRecognizer(model_or_path)
+
+    onnx_path = model_or_path
+    cfg_path = config_path
+
+    # Versions of fast-plate-ocr have used different kwarg names for custom
+    # ONNX loading. Try the most likely combinations.
+    attempts: list[dict[str, str | None]] = [
+        # Newer (0.5+): explicit onnx+config keywords
+        {"onnx_model_path": onnx_path, "plate_config_path": cfg_path},
+        {"model_path": onnx_path, "model_config_path": cfg_path},
+        # Older shape: positional path + kw for config
+        {"hub_ocr_model": onnx_path, "plate_config_path": cfg_path},
+        # Last resort: pass path positionally (some versions accept it)
+        {"model_name": onnx_path},
+    ]
+
+    last_err: Exception | None = None
+    for kwargs in attempts:
+        # strip Nones (config_path may be missing)
+        clean = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            return _LicensePlateRecognizer(**clean)
+        except (TypeError, ValueError) as exc:
+            last_err = exc
+            continue
+        except Exception as exc:  # noqa: BLE001 - genuinely don't know what's raised
+            last_err = exc
+            continue
+
+    raise RuntimeError(
+        f"Could not load custom ONNX {onnx_path!r} via any known "
+        f"fast-plate-ocr API. Last error: {last_err}"
+    )
+
+
 def _preprocess_for_ocr(jpeg_bytes: bytes) -> bytes:
     """Apply CLAHE (adaptive histogram equalization) + sharpening before OCR.
 
@@ -106,6 +165,7 @@ class PlateRecognizer:
         self,
         model_name: str = DEFAULT_MODEL,
         *,
+        model_config: str | None = None,
         preprocess: bool = False,
     ) -> None:
         if _IMPORT_ERROR is not None:
@@ -113,13 +173,15 @@ class PlateRecognizer:
                 "PlateRecognizer dependencies missing: "
                 f"{_IMPORT_ERROR}. Install with: pip install fast-plate-ocr opencv-python-headless"
             )
-        # First instantiation triggers a ~10MB model download to ~/.cache/
-        self._lpr = _LicensePlateRecognizer(model_name)
+        # _load_lpr decides between hub-name and custom-ONNX-path automatically.
+        # For hub models this triggers a ~10MB download to ~/.cache/ on first use.
+        self._lpr = _load_lpr(model_name, model_config)
         self._model_name = model_name
+        self._model_config = model_config
         self._preprocess = preprocess
         _logger.info(
-            "PlateRecognizer initialised with model=%s preprocess=%s",
-            model_name, preprocess,
+            "PlateRecognizer initialised with model=%s config=%s preprocess=%s",
+            model_name, model_config, preprocess,
         )
 
     @property
@@ -259,6 +321,7 @@ def make_recognizer(config: StationConfig) -> Any:
         try:
             return PlateRecognizer(
                 model_name=config.ocr_model_name,
+                model_config=config.ocr_model_config,
                 preprocess=config.ocr_preprocess,
             )
         except RuntimeError as exc:

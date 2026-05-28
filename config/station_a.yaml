@@ -28,11 +28,19 @@ log_level: INFO
 #   "noop"            → 完全關閉 OCR(只跑車輛偵測,passage 事件無 plate_text)
 #
 # ocr_model_name (僅 fast-plate-ocr 有效;PaddleOCR 用 ocr_backend 切):
-#   "global-plates-mobile-vit-v2-model"     → 全球(目前預設,對台灣弱)
-#   "european-plates-mobile-vit-v2-model"   → 歐洲(字符集相近,值得試)
-#   "cct-xs-v1-global-model"                → 新版 CCT 架構
+#   hub 模型(自動下載):
+#     "global-plates-mobile-vit-v2-model"   → 全球(預設,對台灣弱 ~10%)
+#     "european-plates-mobile-vit-v2-model" → 歐洲(字符集相近)
+#     "cct-xs-v1-global-model"              → 新版 CCT 架構
+#   自訓 ONNX(W3+ Phase B v2 學生訓練產出):
+#     "/home/kevin30/speed-trap/models/taiwan_ocr.onnx"
+#     ↑ 絕對路徑,搭配下方 ocr_model_config 指向對應的 plate_config.yaml
+#
+# ocr_model_config: 自訓 ONNX 時必填,指向 plate_config.yaml(訓練輸出有);
+#                   hub 模型留 null 即可
 #
 # ocr_preprocess: true 會在 OCR 前做 CLAHE 對比增強 + unsharp,可能救回低對比車牌
 ocr_backend: fast-plate-ocr
 ocr_model_name: global-plates-mobile-vit-v2-model
+ocr_model_config: null
 ocr_preprocess: false

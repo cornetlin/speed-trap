@@ -22,10 +22,14 @@ class StationConfig:
     mqtt_broker: str | None
     mqtt_topic: str
     log_level: str
-    # OCR configuration (Phase A — swap backends without code changes)
-    ocr_backend: str = "fast-plate-ocr"        # "fast-plate-ocr" | "paddleocr" | "noop"
-    ocr_model_name: str = "global-plates-mobile-vit-v2-model"  # fast-plate-ocr model variant
-    ocr_preprocess: bool = False               # apply CLAHE + sharpen before OCR
+    # OCR configuration (Phase A — swap backends without code changes).
+    # ocr_model_name: fast-plate-ocr hub name OR absolute path to a .onnx file.
+    # ocr_model_config: only set when ocr_model_name is a path — points at
+    #                   the plate_config.yaml that the training step produced.
+    ocr_backend: str = "fast-plate-ocr"   # "fast-plate-ocr" | "paddleocr" | "noop"
+    ocr_model_name: str = "global-plates-mobile-vit-v2-model"
+    ocr_model_config: str | None = None
+    ocr_preprocess: bool = False          # apply CLAHE + sharpen before OCR
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.trigger_line_y <= 1.0:
@@ -64,6 +68,11 @@ def load_config(path: Path) -> StationConfig:
         ocr_backend=str(data.get("ocr_backend", "fast-plate-ocr")),
         ocr_model_name=str(
             data.get("ocr_model_name", "global-plates-mobile-vit-v2-model")
+        ),
+        ocr_model_config=(
+            str(data["ocr_model_config"])
+            if data.get("ocr_model_config")
+            else None
         ),
         ocr_preprocess=bool(data.get("ocr_preprocess", False)),
     )

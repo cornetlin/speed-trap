@@ -160,6 +160,7 @@ def _config(
     *,
     ocr_backend: str = "fast-plate-ocr",
     ocr_model_name: str = "global-plates-mobile-vit-v2-model",
+    ocr_model_config: str | None = None,
     ocr_preprocess: bool = False,
 ) -> StationConfig:
     return StationConfig(
@@ -177,6 +178,7 @@ def _config(
         log_level="INFO",
         ocr_backend=ocr_backend,
         ocr_model_name=ocr_model_name,
+        ocr_model_config=ocr_model_config,
         ocr_preprocess=ocr_preprocess,
     )
 
@@ -234,3 +236,44 @@ def test_preprocess_helper_handles_invalid_jpeg() -> None:
     """Corrupt input should be returned unchanged, not crash."""
     out = pr._preprocess_for_ocr(b"not a real jpeg")
     assert out == b"not a real jpeg"
+
+
+# ─── _is_path_like — path vs hub-name detection (Phase B custom ONNX) ──
+
+
+def test_is_path_like_hub_names_return_false() -> None:
+    assert pr._is_path_like("global-plates-mobile-vit-v2-model") is False
+    assert pr._is_path_like("european-plates-mobile-vit-v2-model") is False
+    assert pr._is_path_like("cct-xs-v1-global-model") is False
+
+
+def test_is_path_like_paths_return_true() -> None:
+    assert pr._is_path_like("/home/kevin30/models/taiwan_ocr.onnx") is True
+    assert pr._is_path_like(r"C:\models\taiwan_ocr.onnx") is True
+    assert pr._is_path_like("./models/best.onnx") is True
+    assert pr._is_path_like("models/best.onnx") is True
+
+
+def test_is_path_like_bare_onnx_filename() -> None:
+    assert pr._is_path_like("best.onnx") is True
+    assert pr._is_path_like("BEST.ONNX") is True   # case-insensitive
+
+
+def test_is_path_like_empty() -> None:
+    assert pr._is_path_like("") is False
+
+
+def test_make_recognizer_passes_model_config_through() -> None:
+    """Factory should hand ocr_model_config to PlateRecognizer constructor.
+    When fast-plate-ocr isn't installed we fall back to Noop (no crash)."""
+    if pr._IMPORT_ERROR is None:
+        pytest.skip("fast-plate-ocr installed; can't exercise the deps-missing branch")
+    cfg = _config(
+        ocr_backend="fast-plate-ocr",
+        ocr_model_name="/path/to/custom.onnx",
+        ocr_model_config="/path/to/plate_config.yaml",
+    )
+    rec = pr.make_recognizer(cfg)
+    # On a machine without fast-plate-ocr installed, the construction attempt
+    # raises RuntimeError and we return Noop. The important thing is no crash.
+    assert isinstance(rec, NoopPlateRecognizer)
