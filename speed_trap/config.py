@@ -26,10 +26,20 @@ class StationConfig:
     # ocr_model_name: fast-plate-ocr hub name OR absolute path to a .onnx file.
     # ocr_model_config: only set when ocr_model_name is a path — points at
     #                   the plate_config.yaml that the training step produced.
+    # ocr_plate_detector_path: W3 v2 — W2-trained plate_detector .pt/.onnx,
+    #                          run on Pi CPU via ultralytics. When set, the
+    #                          recognizer crops the plate region out of the
+    #                          vehicle bbox BEFORE feeding fast-plate-ocr.
+    #                          Without it, OCR gets the whole vehicle and
+    #                          tries (badly) to find the plate itself.
+    # save_debug_crops: dump JPGs of (vehicle, plate) to /tmp/speedtrap_debug
+    #                   so we can inspect what each stage sees. Off in prod.
     ocr_backend: str = "fast-plate-ocr"   # "fast-plate-ocr" | "paddleocr" | "noop"
     ocr_model_name: str = "global-plates-mobile-vit-v2-model"
     ocr_model_config: str | None = None
+    ocr_plate_detector_path: str | None = None
     ocr_preprocess: bool = False          # apply CLAHE + sharpen before OCR
+    save_debug_crops: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.trigger_line_y <= 1.0:
@@ -74,5 +84,11 @@ def load_config(path: Path) -> StationConfig:
             if data.get("ocr_model_config")
             else None
         ),
+        ocr_plate_detector_path=(
+            str(data["ocr_plate_detector_path"])
+            if data.get("ocr_plate_detector_path")
+            else None
+        ),
         ocr_preprocess=bool(data.get("ocr_preprocess", False)),
+        save_debug_crops=bool(data.get("save_debug_crops", False)),
     )

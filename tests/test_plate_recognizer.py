@@ -161,7 +161,9 @@ def _config(
     ocr_backend: str = "fast-plate-ocr",
     ocr_model_name: str = "global-plates-mobile-vit-v2-model",
     ocr_model_config: str | None = None,
+    ocr_plate_detector_path: str | None = None,
     ocr_preprocess: bool = False,
+    save_debug_crops: bool = False,
 ) -> StationConfig:
     return StationConfig(
         station_id="x",
@@ -179,7 +181,9 @@ def _config(
         ocr_backend=ocr_backend,
         ocr_model_name=ocr_model_name,
         ocr_model_config=ocr_model_config,
+        ocr_plate_detector_path=ocr_plate_detector_path,
         ocr_preprocess=ocr_preprocess,
+        save_debug_crops=save_debug_crops,
     )
 
 
@@ -277,3 +281,29 @@ def test_make_recognizer_passes_model_config_through() -> None:
     # On a machine without fast-plate-ocr installed, the construction attempt
     # raises RuntimeError and we return Noop. The important thing is no crash.
     assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_make_recognizer_passes_cascade_fields_through() -> None:
+    """v1.6.0 cascade fields (plate_detector_path + save_debug_crops) must
+    reach PlateRecognizer's constructor."""
+    if pr._IMPORT_ERROR is None:
+        pytest.skip("fast-plate-ocr installed; can't exercise the deps-missing branch")
+    cfg = _config(
+        ocr_backend="fast-plate-ocr",
+        ocr_model_name="/path/to/custom.onnx",
+        ocr_plate_detector_path="/path/to/plate_detector.pt",
+        save_debug_crops=True,
+    )
+    # Without fast-plate-ocr installed the factory falls back to Noop,
+    # so we can only assert it didn't crash. The real factory wiring is
+    # exercised by integration tests on the Pi.
+    rec = pr.make_recognizer(cfg)
+    assert isinstance(rec, NoopPlateRecognizer)
+
+
+def test_noop_recognizer_has_no_plate_detector() -> None:
+    """Noop fallback must not pretend to have a plate detector."""
+    rec = NoopPlateRecognizer()
+    # NoopPlateRecognizer doesn't expose has_plate_detector but should not
+    # be considered "with detector" anywhere
+    assert not hasattr(rec, "has_plate_detector") or rec.has_plate_detector is False  # type: ignore[attr-defined]

@@ -273,3 +273,51 @@ def test_ocr_backend_noop_accepted() -> None:
         ocr_backend="noop",
     )
     assert cfg.ocr_backend == "noop"
+
+
+# ─── W3 v2: cascade + debug crops ──────────────────────────────────────
+
+
+def test_cascade_fields_default_to_none_off(tmp_path: Path) -> None:
+    """Existing YAMLs without v1.6.0 keys keep the W3 v1 behaviour."""
+    yaml_path = _write_yaml(
+        tmp_path,
+        """
+        station_id: x
+        camera_source: cam
+        frame_width: 640
+        frame_height: 480
+        frame_fps: 30
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
+        vehicle_classes: [car]
+        trigger_line_y: 0.5
+        mqtt_topic: t
+        """,
+    )
+    cfg = load_config(yaml_path)
+    assert cfg.ocr_plate_detector_path is None
+    assert cfg.save_debug_crops is False
+
+
+def test_load_config_cascade_fields_set(tmp_path: Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path,
+        """
+        station_id: x
+        camera_source: cam
+        frame_width: 640
+        frame_height: 480
+        frame_fps: 30
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
+        vehicle_classes: [car]
+        trigger_line_y: 0.5
+        mqtt_topic: t
+        ocr_plate_detector_path: /home/kevin30/speed-trap/models/plate_detector.pt
+        save_debug_crops: true
+        """,
+    )
+    cfg = load_config(yaml_path)
+    assert cfg.ocr_plate_detector_path == "/home/kevin30/speed-trap/models/plate_detector.pt"
+    assert cfg.save_debug_crops is True

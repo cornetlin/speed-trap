@@ -158,15 +158,28 @@ class PlateReading:
 
 
 class PlateRecognizer:
-    """Wraps fast-plate-ocr. Single instance, thread-safe enough for our use
-    (only called from the consumer loop on trigger, not per-frame)."""
+    """Wraps fast-plate-ocr + optional CPU plate detector (W3 v2 cascade).
+
+    Single instance, thread-safe enough for our use (only called from the
+    consumer loop on trigger, not per-frame).
+
+    When ``plate_detector_path`` is set, ``read_from_jpeg`` runs the W2
+    plate detector on the input first to crop the plate region out of
+    the vehicle bbox, then sends only that crop to fast-plate-ocr. This
+    is the 3-stage cascade — Hailo vehicle → CPU plate → CPU OCR — which
+    PC tests showed reaches 4/5 exact on standard Taiwan plates vs 0/25
+    when we let fast-plate-ocr try to find the plate inside a whole-
+    vehicle crop.
+    """
 
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
         *,
         model_config: str | None = None,
+        plate_detector_path: str | None = None,
         preprocess: bool = False,
+        save_debug_crops: bool = False,
     ) -> None:
         if _IMPORT_ERROR is not None:
             raise RuntimeError(
@@ -179,22 +192,47 @@ class PlateRecognizer:
         self._model_name = model_name
         self._model_config = model_config
         self._preprocess = preprocess
+        self._save_debug_crops = save_debug_crops
+        self._debug_dir = "/tmp/speedtrap_debug"
+        self._debug_seq = 0
+
+        # Stage 2 of the cascade — lazy-loaded so missing ultralytics on
+        # PC dev doesn't break import of this module.
+        self._plate_detector: Any = None
+        if plate_detector_path:
+            from speed_trap.plate_detector_cpu import PlateDetectorCPU
+
+            self._plate_detector = PlateDetectorCPU(plate_detector_path)
+
+        if self._save_debug_crops:
+            os.makedirs(self._debug_dir, exist_ok=True)
+
         _logger.info(
-            "PlateRecognizer initialised with model=%s config=%s preprocess=%s",
-            model_name, model_config, preprocess,
+            "PlateRecognizer initialised with model=%s config=%s plate_detector=%s "
+            "preprocess=%s save_debug_crops=%s",
+            model_name,
+            model_config,
+            plate_detector_path or "(none — direct OCR)",
+            preprocess,
+            save_debug_crops,
         )
 
     @property
     def model_name(self) -> str:
         return self._model_name
 
+    @property
+    def has_plate_detector(self) -> bool:
+        return self._plate_detector is not None
+
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
-        """Run OCR on JPEG bytes. Returns None if no plate could be read.
+        """Run the configured cascade (optional plate detect → OCR).
+
+        Returns None if any stage fails: empty input, plate detector
+        finds nothing, OCR returns empty.
 
         fast-plate-ocr models expect grayscale input at a model-specific
         resolution (e.g. 70x140 for global-plates-mobile-vit-v2-model).
-        Passing a numpy RGB array fails with
-            Got invalid dimensions: index 3 Got: 3 Expected: 1
         Easiest path: write the JPEG to a temp file and let ``run(path)``
         do its own preprocessing — works across all fast-plate-ocr model
         variants without us hard-coding their input shape.
@@ -202,10 +240,28 @@ class PlateRecognizer:
         if not jpeg_bytes:
             return None
 
-        payload = _preprocess_for_ocr(jpeg_bytes) if self._preprocess else jpeg_bytes
+        # Debug: dump what we got from the caller (e.g. Hailo vehicle crop)
+        self._maybe_save_debug("vehicle", jpeg_bytes)
 
-        # tempfile path on Pi is /tmp which is tmpfs (RAM) on most distros,
-        # so the round-trip is basically a memcpy + ONNX inference.
+        # Stage 2 — plate detection on the vehicle crop
+        if self._plate_detector is not None:
+            plate_jpeg = self._plate_detector.detect_best_plate_crop(jpeg_bytes)
+            if plate_jpeg is None:
+                _logger.debug("plate detector found no plate in input crop")
+                return None
+            self._maybe_save_debug("plate", plate_jpeg)
+            payload = plate_jpeg
+        else:
+            payload = jpeg_bytes
+
+        # Optional contrast / sharpen preprocessing
+        if self._preprocess:
+            payload = _preprocess_for_ocr(payload)
+            self._maybe_save_debug("preproc", payload)
+
+        # Stage 3 — OCR. tempfile path on Pi is /tmp which is tmpfs (RAM)
+        # on most distros, so the round-trip is basically a memcpy + ONNX
+        # inference.
         fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_plate_")
         try:
             os.write(fd, payload)
@@ -214,6 +270,19 @@ class PlateRecognizer:
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
+
+    def _maybe_save_debug(self, kind: str, jpeg_bytes: bytes) -> None:
+        if not self._save_debug_crops or not jpeg_bytes:
+            return
+        self._debug_seq += 1
+        path = os.path.join(
+            self._debug_dir, f"{self._debug_seq:05d}_{kind}.jpg"
+        )
+        try:
+            with open(path, "wb") as f:
+                f.write(jpeg_bytes)
+        except OSError as exc:
+            _logger.warning("save_debug_crops: failed to write %s: %s", path, exc)
 
     def _read_path(self, image_path: str) -> PlateReading | None:
         try:
@@ -322,7 +391,9 @@ def make_recognizer(config: StationConfig) -> Any:
             return PlateRecognizer(
                 model_name=config.ocr_model_name,
                 model_config=config.ocr_model_config,
+                plate_detector_path=config.ocr_plate_detector_path,
                 preprocess=config.ocr_preprocess,
+                save_debug_crops=config.save_debug_crops,
             )
         except RuntimeError as exc:
             _logger.warning(

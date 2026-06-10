@@ -39,8 +39,19 @@ log_level: INFO
 # ocr_model_config: 自訓 ONNX 時必填,指向 plate_config.yaml(訓練輸出有);
 #                   hub 模型留 null 即可
 #
+# ocr_plate_detector_path: W3 v2 cascade — W2 訓的車牌偵測模型 (.pt or .onnx)
+#   設定後系統會先在 Hailo 切出的車輛 crop 內找車牌 bbox,再 crop 餵 OCR。
+#   不設則直接把整輛車 crop 丟給 OCR(經驗上會讀很糟)。
+#   例: /home/kevin30/speed-trap/models/plate_detector.pt
+#
 # ocr_preprocess: true 會在 OCR 前做 CLAHE 對比增強 + unsharp,可能救回低對比車牌
+#
+# save_debug_crops: true 把每次的 vehicle/plate/preproc crop 存到
+#   /tmp/speedtrap_debug/00001_vehicle.jpg 等,供事後檢查 cascade 每階段
+#   是否切對。Production 應為 false。
 ocr_backend: fast-plate-ocr
 ocr_model_name: global-plates-mobile-vit-v2-model
 ocr_model_config: null
+ocr_plate_detector_path: null
 ocr_preprocess: false
+save_debug_crops: false
