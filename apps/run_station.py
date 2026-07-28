@@ -17,6 +17,7 @@ import logging
 import signal
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from types import FrameType
 from typing import Any, Protocol
@@ -40,6 +41,41 @@ _PRUNE_INTERVAL_NS = 1_000_000_000
 REVIEW_ALL_FRAMES_EDGE = "all_frames_touch_edge"
 REVIEW_NO_PLATE = "no_plate_read"
 REVIEW_BAD_FORMAT = "not_taiwan_format"
+REVIEW_DUPLICATE = "duplicate_plate"
+
+
+class _DuplicateGuard:
+    """同一台車被 tracker 中途斷開、重新編號時會產生兩筆事件。
+
+    用車牌字串在時間視窗內比對:視窗內出現過同樣的字串、而且是不同的
+    track id,就當作同一台車的重複紀錄,寫進診斷資料但不送出。
+
+    限制:讀不到車牌時無從比對,一律放行 —— 寧可多記一筆,也不要把兩台
+    真的不同的車併成一筆。
+    """
+
+    def __init__(self, window_s: float) -> None:
+        self._window_ns = int(window_s * 1_000_000_000)
+        self._recent: deque[tuple[int, str, int]] = deque()
+
+    @property
+    def enabled(self) -> bool:
+        return self._window_ns > 0
+
+    def duplicate_of(self, plate: str | None, now_ns: int, track_id: int) -> int | None:
+        """回傳先前那筆的 track_id 表示重複;None 表示不是重複。"""
+        if not self.enabled or not plate:
+            return None
+        while self._recent and now_ns - self._recent[0][0] > self._window_ns:
+            self._recent.popleft()
+        for _ts, text, previous_id in self._recent:
+            if text == plate and previous_id != track_id:
+                return previous_id
+        return None
+
+    def remember(self, plate: str | None, now_ns: int, track_id: int) -> None:
+        if self.enabled and plate:
+            self._recent.append((now_ns, plate, track_id))
 
 
 class _PlateRecognizerLike(Protocol):
@@ -71,6 +107,7 @@ def _settle_track(
     track: VehicleTrack,
     sink: EventSink,
     plate_reader: _PlateRecognizerLike,
+    guard: _DuplicateGuard,
 ) -> bool:
     """挑幀 → OCR → 送出事件。回傳是否真的送出。"""
     best = track.best_frame()
@@ -106,6 +143,22 @@ def _settle_track(
         review_reasons.append(REVIEW_NO_PLATE)
     elif not reading.is_taiwan_format:
         review_reasons.append(REVIEW_BAD_FORMAT)
+
+    plate_text = reading.text if reading else None
+    duplicate_of = guard.duplicate_of(plate_text, det.frame_ns, track.track_id)
+    if duplicate_of is not None:
+        review_reasons.append(REVIEW_DUPLICATE)
+        _logger.warning(
+            "track %d (%s) 讀到 %s,與 track %d 在 %.0f 秒內重複 —— "
+            "多半是同一台車被 tracker 斷開重新編號,不送出事件",
+            track.track_id,
+            track.label,
+            plate_text,
+            duplicate_of,
+            config.duplicate_window_s,
+        )
+        return False
+    guard.remember(plate_text, det.frame_ns, track.track_id)
 
     event = PassageEvent(
         station_id=config.station_id,
@@ -147,13 +200,29 @@ def _settle_finished(
     trigger: TriggerLineDetector,
     sink: EventSink,
     plate_reader: _PlateRecognizerLike,
+    guard: _DuplicateGuard | None = None,
 ) -> int:
+    guard = guard if guard is not None else _DuplicateGuard(config.duplicate_window_s)
     emitted = 0
     for track in tracks:
-        if not trigger.was_triggered(track.track_id):
+        triggered = trigger.was_triggered(track.track_id)
+        # 不論有沒有過線都要清掉狀態:_states 原本只增不減,而且 track id
+        # 會被 hailotracker 回收再利用。
+        trigger.forget(track.track_id)
+
+        if not triggered:
             # 沒過線的 track(還沒開到、或只是畫面邊緣晃過)不算通行。
             continue
-        if _settle_track(config, track, sink, plate_reader):
+        if track.frame_count < config.min_track_frames:
+            _logger.info(
+                "track %d (%s) 只出現 %d 幀(門檻 %d),視為雜訊不計入通行",
+                track.track_id,
+                track.label,
+                track.frame_count,
+                config.min_track_frames,
+            )
+            continue
+        if _settle_track(config, track, sink, plate_reader, guard):
             emitted += 1
     return emitted
 
@@ -171,7 +240,10 @@ def run_station(
     )
     trigger = TriggerLineDetector(line_y=config.trigger_line_y)
     plate_reader: _PlateRecognizerLike = recognizer or NoopPlateRecognizer()
+    guard = _DuplicateGuard(config.duplicate_window_s)
+    vehicle_classes = set(config.vehicle_classes)
     emitted = 0
+    skipped_non_vehicle = 0
     last_prune_ns = time.monotonic_ns()
 
     source.start()
@@ -179,6 +251,14 @@ def run_station(
         for det in source.iter_detections():
             if stop_flag.stopped:
                 break
+
+            if det.label not in vehicle_classes:
+                # 來源(hailo_source)已經依 vehicle_classes 過濾過,這裡是
+                # 防呆:確保無論來源怎麼換,只有車輛類別會產生通行事件。
+                # RTSP 畫面上看得到行人與盆栽的框,是因為 hailooverlay 畫的
+                # 是過濾前的全部偵測,那條線不影響這裡的計數。
+                skipped_non_vehicle += 1
+                continue
 
             tracker.update([det])
             track = tracker.get_track(det.track_id)
@@ -204,6 +284,7 @@ def run_station(
                     trigger,
                     sink,
                     plate_reader,
+                    guard,
                 )
                 last_prune_ns = now_ns
     finally:
@@ -211,7 +292,16 @@ def run_station(
 
     # 收工:畫面上還在的車,只要已經過線就補結算,不要因為停止而漏掉。
     emitted += _settle_finished(
-        config, tracker.drain(), trigger, sink, plate_reader
+        config, tracker.drain(), trigger, sink, plate_reader, guard
+    )
+    if skipped_non_vehicle:
+        _logger.info(
+            "略過 %d 筆非車輛類別的偵測(vehicle_classes=%s)",
+            skipped_non_vehicle,
+            sorted(vehicle_classes),
+        )
+    _logger.info(
+        "trigger 狀態表殘留 %d 筆(正常應為 0)", trigger.tracked_count
     )
     return emitted
 

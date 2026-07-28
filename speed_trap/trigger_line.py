@@ -43,3 +43,17 @@ class TriggerLineDetector:
     def was_triggered(self, track_id: int) -> bool:
         state = self._states.get(track_id)
         return state is not None and state.triggered
+
+    def forget(self, track_id: int) -> None:
+        """車子離開畫面後清掉它的狀態。
+
+        兩個理由:一是 _states 原本只增不減,長時間運轉會一直長大;二是
+        hailotracker 的 track id 會被回收再利用,舊狀態留著的話,下一台
+        拿到同一個 id 的車會直接繼承 triggered=True,還沒過線就被結算。
+        """
+        self._states.pop(track_id, None)
+
+    @property
+    def tracked_count(self) -> int:
+        """目前記著幾條 track —— 用來確認狀態有被清掉。"""
+        return len(self._states)
