@@ -78,7 +78,6 @@ except Exception as exc:  # pragma: no cover - hardware-only path
 
 
 _QUEUE_MAX = 512
-_JPEG_QUALITY = 85
 
 # 相機輸出格式必須寫死在 caps 裡。留空讓 GStreamer 自行協商的話,結果會隨
 # libcamera 版本與相機模式改變,同一份程式會時好時壞。
@@ -278,7 +277,9 @@ class HailoDetectionSource:
         self._raw_misses = 0  # 只用來節流 warning,統計數字在 _stats 裡
 
         # --- health reporting ----------------------------------------------
-        self._stats = _PipelineStats()
+        self._stats = _PipelineStats(
+            track_idle_timeout_s=config.track_idle_timeout_s
+        )
         self._stats_interval_s = float(stats_interval_s)
         self._stats_stop = threading.Event()
         self._stats_thread: threading.Thread | None = None
@@ -416,7 +417,8 @@ class HailoDetectionSource:
             f"{hailo_caps} ! "
             f"hailonet hef-path={cfg.hef_path} batch-size=1 ! "
             f"hailofilter so-path={cfg.hailofilter_so_path} qos=false ! "
-            "hailotracker name=tracker keep-tracked-frames=10 keep-new-frames=10 ! "
+            f"hailotracker name=tracker keep-tracked-frames={cfg.tracker_keep_frames} "
+            f"keep-new-frames={cfg.tracker_keep_frames} ! "
             "tee name=dettee ! "
             # === 線路 A：純辨識線 (送給 Python 取圖與 OCR) ===
             "queue leaky=downstream max-size-buffers=5 ! "
@@ -615,7 +617,9 @@ class HailoDetectionSource:
         )
         crop_bgr = _cv2.cvtColor(crop_rgb, _cv2.COLOR_RGB2BGR)
         ok, jpeg = _cv2.imencode(
-            ".jpg", crop_bgr, [int(_cv2.IMWRITE_JPEG_QUALITY), _JPEG_QUALITY]
+            ".jpg",
+            crop_bgr,
+            [int(_cv2.IMWRITE_JPEG_QUALITY), self._config.jpeg_quality],
         )
         if not ok:
             return None

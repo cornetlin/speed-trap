@@ -53,6 +53,42 @@ log_level: INFO
 # save_debug_crops: false 把每次的 vehicle/plate/preproc crop 存到
 #   ~/speedtrap_debug/00001_vehicle.jpg 等(SD 卡上,重開機不會消失),
 #   供事後檢查 cascade 每階段是否切對。Production 應為 false。
+# =====================================================================
+# 最佳幀挑選 —— 現場調參數區。改這裡就好,不用動程式。
+# =====================================================================
+# edge_margin: 正規化 bbox 任一邊落在畫面邊緣這個距離內,該幀直接排除,
+#   不列入最佳幀候選(車頭出框 = 車牌被裁掉一半)。0.02 = 畫面的 2%。
+#   調大更嚴格、可用幀變少;幀率低時排太嚴會沒幀可用(有保護機制,見下)。
+edge_margin: 0.02
+# 三項評分權重。面積權重過高會偏好「車子最大」也就是快出框的那一幀,
+# 這是先前選錯幀的主因。想更保守就把 area 調降、center 調升。
+score_area_weight: 0.6
+score_center_weight: 0.3
+score_sharpness_weight: 0.1
+# 清晰度(Laplacian 變異數)正規化的參考值。實測畫面普遍偏糊就調小,
+# 普遍銳利就調大。看 CSV 的 chosen_sharpness 欄位來抓。
+sharpness_reference: 500.0
+# 一個 track 多久沒再出現就視為車子已離開畫面 —— 結算時機與每台車幀數
+# 統計都用這個值。
+track_idle_timeout_s: 2.0
+# 少於這麼多幀的 track 視為雜訊(晃動誤判、遠處一閃而過),不產生事件。
+min_track_frames: 2
+# 車輛裁切圖的 JPEG 品質。
+jpeg_quality: 85
+
+# === 重複計數防治 ===
+# hailotracker 的 keep-tracked-frames / keep-new-frames。太小的話車子被
+# 短暫遮住就斷開重編號,同一台車會被算成兩台。
+tracker_keep_frames: 10
+# 這段秒數內讀到相同車牌字串視為重複事件,只寫進 CSV 不送出。0 = 關閉。
+duplicate_window_s: 10.0
+
+# === 診斷輸出 ===
+# 每台車一行的詳細 CSV,以及最佳幀裁切圖(成功失敗都存)。
+# 兩者都設空字串即可關閉。
+passage_csv_path: ~/speedtrap_events.csv
+passage_crop_dir: ~/speedtrap_crops
+
 ocr_backend: fast-plate-ocr
 ocr_model_name: /home/kevin30/speed-trap/models/best.onnx
 ocr_model_config: /home/kevin30/speed-trap/models/plate_config.yaml

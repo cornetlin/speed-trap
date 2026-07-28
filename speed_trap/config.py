@@ -47,6 +47,44 @@ class StationConfig:
     ocr_preprocess: bool = False          # apply CLAHE + sharpen before OCR
     save_debug_crops: bool = False
 
+    # === 最佳幀挑選 —— 現場調參數用,不要為了調這些去改程式 ===
+    #
+    # edge_margin: 正規化 bbox 只要有任一邊落在畫面邊緣這個距離之內,該幀就
+    #   直接排除、不列入最佳幀候選(車頭已經出框,車牌會被裁掉一半)。
+    #   0.02 = 畫面寬高的 2%。調大 = 更嚴格,可用幀變少。
+    # score_*_weight: 面積 / 置中程度 / 清晰度三項的權重。面積權重過高時,
+    #   系統會偏好「車子最大」也就是快出框的那一幀。
+    # sharpness_reference: 清晰度正規化的參考值。清晰度用 Laplacian 變異數,
+    #   數值無上界,除以這個參考值後截在 1.0,才能跟另外兩項同量級相加。
+    #   拍出來普遍偏糊就調小,普遍很銳利就調大。
+    # track_idle_timeout_s: 一個 track 多久沒再出現就視為車子已離開畫面。
+    #   結算時機與每台車幀數統計都用這個值。
+    # min_track_frames: 少於這麼多幀的 track 視為雜訊,不產生事件。
+    # jpeg_quality: 車輛裁切圖的 JPEG 品質。
+    edge_margin: float = 0.02
+    score_area_weight: float = 0.6
+    score_center_weight: float = 0.3
+    score_sharpness_weight: float = 0.1
+    sharpness_reference: float = 500.0
+    track_idle_timeout_s: float = 2.0
+    min_track_frames: int = 2
+    jpeg_quality: int = 85
+
+    # === 重複計數防治 ===
+    # tracker_keep_frames: hailotracker 的 keep-tracked-frames / keep-new-frames。
+    #   太小的話車子被短暫遮住就會斷開、重新編號,同一台車算成兩台。
+    # duplicate_window_s: 這段時間內讀到相同車牌字串視為同一台車的重複事件,
+    #   只記錄不送出。設 0 關閉。
+    tracker_keep_frames: int = 10
+    duplicate_window_s: float = 10.0
+
+    # === 診斷輸出 ===
+    # passage_csv_path: 每台車一行的詳細 CSV。設空字串關閉。
+    # passage_crop_dir: 每台車最佳幀的裁切圖(成功與失敗都存),檔名對應
+    #   CSV 的 crop_file 欄位。設空字串關閉。
+    passage_csv_path: str = "~/speedtrap_events.csv"
+    passage_crop_dir: str = "~/speedtrap_crops"
+
     def __post_init__(self) -> None:
         if not 0.0 <= self.trigger_line_y <= 1.0:
             raise ValueError(
@@ -63,6 +101,31 @@ class StationConfig:
                 f"ocr_backend must be one of {sorted(_VALID_OCR_BACKENDS)}, "
                 f"got {self.ocr_backend!r}"
             )
+        if not 0.0 <= self.edge_margin < 0.5:
+            raise ValueError(
+                f"edge_margin must be in [0, 0.5), got {self.edge_margin}"
+            )
+        for name in (
+            "score_area_weight",
+            "score_center_weight",
+            "score_sharpness_weight",
+        ):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
+        if self.sharpness_reference <= 0.0:
+            raise ValueError("sharpness_reference must be positive")
+        if self.track_idle_timeout_s <= 0.0:
+            raise ValueError("track_idle_timeout_s must be positive")
+        if self.min_track_frames < 1:
+            raise ValueError("min_track_frames must be >= 1")
+        if not 1 <= self.jpeg_quality <= 100:
+            raise ValueError(
+                f"jpeg_quality must be in [1, 100], got {self.jpeg_quality}"
+            )
+        if self.tracker_keep_frames < 1:
+            raise ValueError("tracker_keep_frames must be >= 1")
+        if self.duplicate_window_s < 0.0:
+            raise ValueError("duplicate_window_s must be >= 0")
 
 
 def load_config(path: Path) -> StationConfig:
@@ -100,4 +163,18 @@ def load_config(path: Path) -> StationConfig:
         ),
         ocr_preprocess=bool(data.get("ocr_preprocess", False)),
         save_debug_crops=bool(data.get("save_debug_crops", False)),
+        edge_margin=float(data.get("edge_margin", 0.02)),
+        score_area_weight=float(data.get("score_area_weight", 0.6)),
+        score_center_weight=float(data.get("score_center_weight", 0.3)),
+        score_sharpness_weight=float(data.get("score_sharpness_weight", 0.1)),
+        sharpness_reference=float(data.get("sharpness_reference", 500.0)),
+        track_idle_timeout_s=float(data.get("track_idle_timeout_s", 2.0)),
+        min_track_frames=int(data.get("min_track_frames", 2)),
+        jpeg_quality=int(data.get("jpeg_quality", 85)),
+        tracker_keep_frames=int(data.get("tracker_keep_frames", 10)),
+        duplicate_window_s=float(data.get("duplicate_window_s", 10.0)),
+        passage_csv_path=str(
+            data.get("passage_csv_path", "~/speedtrap_events.csv")
+        ),
+        passage_crop_dir=str(data.get("passage_crop_dir", "~/speedtrap_crops")),
     )
