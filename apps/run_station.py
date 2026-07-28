@@ -25,12 +25,19 @@ from typing import Any, Protocol
 from speed_trap.config import StationConfig, load_config
 from speed_trap.event import EventSink, PassageEvent, make_sink
 from speed_trap.hailo_source import HailoDetectionSource
+from speed_trap.passage_log import PassageLogger, PassageRecord
 from speed_trap.plate_recognizer import (
     NoopPlateRecognizer,
     PlateReading,
     make_recognizer,
+    run_ocr,
 )
-from speed_trap.tracker import ScoringParams, VehicleTrack, VehicleTracker
+from speed_trap.tracker import (
+    ScoringParams,
+    VehicleTrack,
+    VehicleTracker,
+    touches_edge,
+)
 from speed_trap.trigger_line import TriggerLineDetector
 
 _logger = logging.getLogger(__name__)
@@ -42,6 +49,8 @@ REVIEW_ALL_FRAMES_EDGE = "all_frames_touch_edge"
 REVIEW_NO_PLATE = "no_plate_read"
 REVIEW_BAD_FORMAT = "not_taiwan_format"
 REVIEW_DUPLICATE = "duplicate_plate"
+REVIEW_NO_FRAME = "no_usable_frame"
+REVIEW_TOO_FEW_FRAMES = "too_few_frames"
 
 
 class _DuplicateGuard:
@@ -108,8 +117,13 @@ def _settle_track(
     sink: EventSink,
     plate_reader: _PlateRecognizerLike,
     guard: _DuplicateGuard,
+    passage_log: PassageLogger | None = None,
 ) -> bool:
-    """挑幀 → OCR → 送出事件。回傳是否真的送出。"""
+    """挑幀 → OCR → 送出事件 → 寫診斷紀錄。回傳是否真的送出。
+
+    不論送不送出都會寫一行 CSV 與一張裁切圖 —— 讀不出來的那幾台才是要
+    回頭看的。
+    """
     best = track.best_frame()
     if best is None:
         _logger.warning(
@@ -118,6 +132,19 @@ def _settle_track(
             track.label,
             track.frame_count,
         )
+        if passage_log is not None:
+            passage_log.log(
+                PassageRecord(
+                    station_id=config.station_id,
+                    track_id=track.track_id,
+                    label=track.label,
+                    total_frames=track.frame_count,
+                    edge_frames=track.edge_frame_count,
+                    needs_review=1,
+                    review_reason=REVIEW_NO_FRAME,
+                ),
+                None,
+            )
         return False
 
     review_reasons: list[str] = []
@@ -136,9 +163,8 @@ def _settle_track(
         review_reasons.append(REVIEW_ALL_FRAMES_EDGE)
 
     det = best.detection
-    reading = (
-        plate_reader.read_from_jpeg(det.frame_jpeg) if det.frame_jpeg else None
-    )
+    attempt = run_ocr(plate_reader, det.frame_jpeg)
+    reading = attempt.reading
     if reading is None:
         review_reasons.append(REVIEW_NO_PLATE)
     elif not reading.is_taiwan_format:
@@ -157,8 +183,8 @@ def _settle_track(
             duplicate_of,
             config.duplicate_window_s,
         )
-        return False
-    guard.remember(plate_text, det.frame_ns, track.track_id)
+    else:
+        guard.remember(plate_text, det.frame_ns, track.track_id)
 
     event = PassageEvent(
         station_id=config.station_id,
@@ -167,18 +193,27 @@ def _settle_track(
         timestamp_ns=det.frame_ns,
         confidence=det.confidence,
         image_sha256=_hash_image(det.frame_jpeg),
-        plate_text=reading.text if reading else None,
+        plate_text=plate_text,
         plate_confidence=reading.confidence if reading else None,
         plate_is_taiwan_format=reading.is_taiwan_format if reading else None,
         needs_review=bool(review_reasons),
         review_reason=";".join(review_reasons) or None,
     )
-    sink.emit(event)
+    emitted = duplicate_of is None
+    if emitted:
+        sink.emit(event)
+
+    if passage_log is not None:
+        passage_log.log(
+            _make_record(config, track, best, det, attempt, event, emitted, duplicate_of),
+            det.frame_jpeg,
+        )
 
     _logger.info(
-        "passage emitted: track=%d label=%s frames=%d (edge %d) "
-        "chosen=#%d score=%.3f sharpness=%.0f plate=%s plate_conf=%s "
-        "tw_format=%s review=%s",
+        "passage %s: track=%d label=%s frames=%d (edge %d) chosen=#%d "
+        "score=%.3f sharpness=%.0f crop=%s plate_box=%s plate=%s "
+        "plate_conf=%s tw_format=%s review=%s",
+        "emitted" if emitted else "suppressed",
         track.track_id,
         track.label,
         track.frame_count,
@@ -186,12 +221,66 @@ def _settle_track(
         best.frame_index,
         best.score,
         det.sharpness,
+        _fmt_wh(det.crop_size or attempt.vehicle_wh),
+        _fmt_wh(attempt.plate_wh),
         event.plate_text or "-",
         f"{event.plate_confidence:.2f}" if event.plate_confidence else "-",
         event.plate_is_taiwan_format,
         event.review_reason or "-",
     )
-    return True
+    return emitted
+
+
+def _fmt_wh(wh: tuple[int, int] | None) -> str:
+    return f"{wh[0]}x{wh[1]}" if wh else "?"
+
+
+def _make_record(
+    config: StationConfig,
+    track: VehicleTrack,
+    best: Any,
+    det: Any,
+    attempt: Any,
+    event: PassageEvent,
+    emitted: bool,
+    duplicate_of: int | None,
+) -> PassageRecord:
+    crop_wh = det.crop_size or attempt.vehicle_wh or (0, 0)
+    plate_wh = attempt.plate_wh or (0, 0)
+    reading = attempt.reading
+    return PassageRecord(
+        station_id=config.station_id,
+        track_id=track.track_id,
+        label=track.label,
+        confidence=round(det.confidence, 4),
+        total_frames=track.frame_count,
+        edge_frames=track.edge_frame_count,
+        chosen_frame_index=best.frame_index,
+        chosen_score=round(best.score, 5),
+        chosen_sharpness=round(det.sharpness, 1),
+        chosen_from_edge_fallback=int(best.from_edge_fallback),
+        bbox_x1=round(det.bbox[0], 5),
+        bbox_y1=round(det.bbox[1], 5),
+        bbox_x2=round(det.bbox[2], 5),
+        bbox_y2=round(det.bbox[3], 5),
+        touches_edge=int(touches_edge(det.bbox, config.edge_margin)),
+        edge_distance=round(best.edge_distance, 5),
+        frame_ns=det.frame_ns,
+        vehicle_crop_w=crop_wh[0],
+        vehicle_crop_h=crop_wh[1],
+        plate_box_w=plate_wh[0],
+        plate_box_h=plate_wh[1],
+        plate_text=event.plate_text or "",
+        plate_raw_text=reading.raw_text if reading else "",
+        plate_confidence=round(reading.confidence, 4) if reading else 0.0,
+        plate_is_taiwan_format=int(bool(reading and reading.is_taiwan_format)),
+        ocr_failure=attempt.failure or "",
+        emitted=int(emitted),
+        needs_review=int(event.needs_review),
+        review_reason=event.review_reason or "",
+        duplicate_of_track=duplicate_of if duplicate_of is not None else -1,
+        image_sha256=event.image_sha256,
+    )
 
 
 def _settle_finished(
@@ -201,6 +290,7 @@ def _settle_finished(
     sink: EventSink,
     plate_reader: _PlateRecognizerLike,
     guard: _DuplicateGuard | None = None,
+    passage_log: PassageLogger | None = None,
 ) -> int:
     guard = guard if guard is not None else _DuplicateGuard(config.duplicate_window_s)
     emitted = 0
@@ -211,7 +301,8 @@ def _settle_finished(
         trigger.forget(track.track_id)
 
         if not triggered:
-            # 沒過線的 track(還沒開到、或只是畫面邊緣晃過)不算通行。
+            # 沒過線的 track(還沒開到、或只是畫面邊緣晃過)不算通行,
+            # 也不寫診斷紀錄,否則 CSV 會被路邊靜物洗掉。
             continue
         if track.frame_count < config.min_track_frames:
             _logger.info(
@@ -221,8 +312,23 @@ def _settle_finished(
                 track.frame_count,
                 config.min_track_frames,
             )
+            if passage_log is not None:
+                best = track.best_frame()
+                passage_log.log(
+                    PassageRecord(
+                        station_id=config.station_id,
+                        track_id=track.track_id,
+                        label=track.label,
+                        total_frames=track.frame_count,
+                        edge_frames=track.edge_frame_count,
+                        chosen_frame_index=best.frame_index if best else -1,
+                        needs_review=1,
+                        review_reason=REVIEW_TOO_FEW_FRAMES,
+                    ),
+                    best.detection.frame_jpeg if best else None,
+                )
             continue
-        if _settle_track(config, track, sink, plate_reader, guard):
+        if _settle_track(config, track, sink, plate_reader, guard, passage_log):
             emitted += 1
     return emitted
 
@@ -233,6 +339,7 @@ def run_station(
     source: HailoDetectionSource,
     stop_flag: _StopFlag,
     recognizer: _PlateRecognizerLike | None = None,
+    passage_log: PassageLogger | None = None,
 ) -> int:
     tracker = VehicleTracker(
         stale_timeout_ns=int(config.track_idle_timeout_s * 1_000_000_000),
@@ -285,6 +392,7 @@ def run_station(
                     sink,
                     plate_reader,
                     guard,
+                    passage_log,
                 )
                 last_prune_ns = now_ns
     finally:
@@ -292,7 +400,7 @@ def run_station(
 
     # 收工:畫面上還在的車,只要已經過線就補結算,不要因為停止而漏掉。
     emitted += _settle_finished(
-        config, tracker.drain(), trigger, sink, plate_reader, guard
+        config, tracker.drain(), trigger, sink, plate_reader, guard, passage_log
     )
     if skipped_non_vehicle:
         _logger.info(
@@ -328,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     sink = make_sink(config)
     source = HailoDetectionSource(config)
     recognizer = make_recognizer(config)
+    passage_log = PassageLogger(config.passage_csv_path, config.passage_crop_dir)
     stop_flag = _StopFlag()
 
     def _handle_signal(signum: int, _frame: FrameType | None) -> None:
@@ -340,9 +449,17 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     try:
-        emitted = run_station(config, sink, source, stop_flag, recognizer=recognizer)
+        emitted = run_station(
+            config,
+            sink,
+            source,
+            stop_flag,
+            recognizer=recognizer,
+            passage_log=passage_log,
+        )
     finally:
         sink.close()
+        passage_log.close()
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
 

@@ -180,6 +180,37 @@ class PlateReading:
     is_taiwan_format: bool
 
 
+@dataclass(frozen=True)
+class OcrAttempt:
+    """一次 OCR 的完整結果,含失敗時的尺寸資訊。
+
+    read_from_jpeg 失敗時只回傳 None,診斷不到「是裁切圖太小、還是找不到
+    車牌、還是 OCR 讀空」。CSV 需要這些數字,所以另外開這條路。
+    """
+
+    reading: PlateReading | None
+    vehicle_wh: tuple[int, int] | None = None
+    plate_wh: tuple[int, int] | None = None
+    failure: str | None = None      # empty_input / no_plate_detected / ocr_empty
+
+
+def run_ocr(recognizer: Any, jpeg_bytes: bytes | None) -> OcrAttempt:
+    """對任何 recognizer 取得 OcrAttempt。
+
+    只實作了 read_from_jpeg 的後端(例如 PaddleOCRRecognizer)也能用,
+    只是拿不到尺寸欄位。
+    """
+    if not jpeg_bytes:
+        return OcrAttempt(reading=None, failure="empty_input")
+    detailed = getattr(recognizer, "read_attempt", None)
+    if callable(detailed):
+        return detailed(jpeg_bytes)
+    reading = recognizer.read_from_jpeg(jpeg_bytes)
+    return OcrAttempt(
+        reading=reading, failure=None if reading else "ocr_empty"
+    )
+
+
 class PlateRecognizer:
     """Wraps fast-plate-ocr + optional CPU plate detector (W3 v2 cascade).
 
@@ -251,10 +282,14 @@ class PlateRecognizer:
         return self._plate_detector is not None
 
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
+        return self.read_attempt(jpeg_bytes).reading
+
+    def read_attempt(self, jpeg_bytes: bytes) -> OcrAttempt:
         """Run the configured cascade (optional plate detect → OCR).
 
-        Returns None if any stage fails: empty input, plate detector
-        finds nothing, OCR returns empty.
+        ``reading`` is None if any stage fails: empty input, plate detector
+        finds nothing, OCR returns empty — ``failure`` says which, and the
+        crop sizes are reported either way so a failure can be diagnosed.
 
         fast-plate-ocr models expect grayscale input at a model-specific
         resolution (e.g. 70x140 for global-plates-mobile-vit-v2-model).
@@ -263,7 +298,7 @@ class PlateRecognizer:
         variants without us hard-coding their input shape.
         """
         if not jpeg_bytes:
-            return None
+            return OcrAttempt(reading=None, failure="empty_input")
 
         # Debug: dump what we got from the caller (e.g. Hailo vehicle crop)
         self._maybe_save_debug("vehicle", jpeg_bytes)
@@ -282,7 +317,11 @@ class PlateRecognizer:
                     "no plate found: vehicle_crop=%s px, plate_box=- px",
                     _fmt_wh(vehicle_wh),
                 )
-                return None
+                return OcrAttempt(
+                    reading=None,
+                    vehicle_wh=vehicle_wh,
+                    failure="no_plate_detected",
+                )
             self._maybe_save_debug("plate", plate_jpeg)
             plate_wh = _jpeg_dimensions(plate_jpeg)
             payload = plate_jpeg
@@ -312,10 +351,17 @@ class PlateRecognizer:
         try:
             os.write(fd, payload)
             os.close(fd)
-            return self._read_path(tmp_path)
+            reading = self._read_path(tmp_path)
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
+
+        return OcrAttempt(
+            reading=reading,
+            vehicle_wh=vehicle_wh,
+            plate_wh=plate_wh,
+            failure=None if reading else "ocr_empty",
+        )
 
     def _maybe_save_debug(self, kind: str, jpeg_bytes: bytes) -> None:
         if not self._save_debug_crops or not jpeg_bytes:
@@ -433,6 +479,9 @@ class NoopPlateRecognizer:
 
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
         return None
+
+    def read_attempt(self, jpeg_bytes: bytes) -> OcrAttempt:
+        return OcrAttempt(reading=None, failure="noop")
 
 
 def make_recognizer(config: StationConfig) -> Any:
