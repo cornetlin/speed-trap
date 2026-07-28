@@ -18,7 +18,7 @@ from speed_trap.plate_recognizer import (
     PlateReading,
     make_recognizer,
 )
-from speed_trap.tracker import VehicleTracker
+from speed_trap.tracker import ScoringParams, VehicleTracker
 from speed_trap.trigger_line import TriggerLineDetector                                                                    
 
 _logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def run_station(
     stop_flag: _StopFlag,
     recognizer: _PlateRecognizerLike | None = None,
 ) -> int:
-    tracker = VehicleTracker()
+    tracker = VehicleTracker(scoring=ScoringParams.from_config(config))
     trigger = TriggerLineDetector(line_y=config.trigger_line_y)
     plate_reader: _PlateRecognizerLike = recognizer or NoopPlateRecognizer()
     emitted = 0
@@ -69,12 +69,32 @@ def run_station(
             if track is None:
                 continue
 
-            crossed = trigger.check_crossing(track, det)                      
+            crossed = trigger.check_crossing(track, det)
             if crossed and not trigger.was_triggered(det.track_id):
-                best = track.best_detection
+                best = track.best_frame()
+                if best is None:
+                    # 這條 track 一幀候選都沒有(連 fallback 都沒有)。
+                    _logger.warning(
+                        "track %d (%s) crossed the line with no usable frame",
+                        det.track_id,
+                        det.label,
+                    )
+                    trigger.mark_triggered(det.track_id)
+                    continue
+                if best.from_edge_fallback:
+                    _logger.warning(
+                        "track %d (%s): 全部 %d 幀都碰到畫面邊界,退而取最不靠邊的"
+                        "第 %d 幀(距邊界 %.3f),需人工複核",
+                        det.track_id,
+                        det.label,
+                        track.frame_count,
+                        best.frame_index,
+                        best.edge_distance,
+                    )
+                best_det = best.detection
                 reading = (
-                    plate_reader.read_from_jpeg(best.frame_jpeg)
-                    if best.frame_jpeg
+                    plate_reader.read_from_jpeg(best_det.frame_jpeg)
+                    if best_det.frame_jpeg
                     else None
                 )
 
@@ -84,7 +104,7 @@ def run_station(
                     label=det.label,
                     timestamp_ns=det.frame_ns,
                     confidence=det.confidence,
-                    image_sha256=_hash_image(best.frame_jpeg),
+                    image_sha256=_hash_image(best_det.frame_jpeg),
                     plate_text=reading.text if reading else None,
                     plate_confidence=reading.confidence if reading else None,
                     plate_is_taiwan_format=reading.is_taiwan_format if reading else None,
