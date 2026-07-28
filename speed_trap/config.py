@@ -68,7 +68,7 @@ class StationConfig:
     sharpness_reference: float = 500.0
     track_idle_timeout_s: float = 2.0
     min_track_frames: int = 2
-    jpeg_quality: int = 85
+    jpeg_quality: int = 92
 
     # === 重複計數防治 ===
     # tracker_keep_frames: hailotracker 的 keep-tracked-frames / keep-new-frames。
@@ -170,7 +170,7 @@ def load_config(path: Path) -> StationConfig:
         sharpness_reference=float(data.get("sharpness_reference", 500.0)),
         track_idle_timeout_s=float(data.get("track_idle_timeout_s", 2.0)),
         min_track_frames=int(data.get("min_track_frames", 2)),
-        jpeg_quality=int(data.get("jpeg_quality", 85)),
+        jpeg_quality=int(data.get("jpeg_quality", 92)),
         tracker_keep_frames=int(data.get("tracker_keep_frames", 10)),
         duplicate_window_s=float(data.get("duplicate_window_s", 10.0)),
         passage_csv_path=str(

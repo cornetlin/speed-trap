@@ -74,7 +74,7 @@ track_idle_timeout_s: 2.0
 # 少於這麼多幀的 track 視為雜訊(晃動誤判、遠處一閃而過),不產生事件。
 min_track_frames: 2
 # 車輛裁切圖的 JPEG 品質。
-jpeg_quality: 85
+jpeg_quality: 92
 
 # === 重複計數防治 ===
 # hailotracker 的 keep-tracked-frames / keep-new-frames。太小的話車子被
