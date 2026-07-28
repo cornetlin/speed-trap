@@ -32,6 +32,10 @@ class Detection:
     confidence: float
     frame_ns: int
     frame_jpeg: bytes | None
+    # 裁切圖的 Laplacian 變異數,由來源在裁切當下算好(那裡本來就有未壓縮
+    # 的像素,不必為了評分再解一次 JPEG)。0.0 = 沒算(來源未提供)。
+    sharpness: float = 0.0
+    crop_size: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class ScoringParams:
     area_weight: float = 0.6
     center_weight: float = 0.3
     sharpness_weight: float = 0.1
+    sharpness_reference: float = 500.0
     edge_margin: float = 0.02
 
     @classmethod
@@ -49,6 +54,7 @@ class ScoringParams:
             area_weight=config.score_area_weight,
             center_weight=config.score_center_weight,
             sharpness_weight=config.score_sharpness_weight,
+            sharpness_reference=config.sharpness_reference,
             edge_margin=config.edge_margin,
         )
 
@@ -72,6 +78,20 @@ def touches_edge(
     return edge_distance(bbox) < margin
 
 
+def normalize_sharpness(
+    variance: float, reference: float = DEFAULT_SCORING.sharpness_reference
+) -> float:
+    """把 Laplacian 變異數壓成 0..1,才能跟面積、置中程度同量級相加。
+
+    變異數本身沒有上界(晴天銳利畫面可以到數千),直接相加會讓清晰度項
+    完全蓋過另外兩項。除以參考值後截在 1.0:達到 reference 就算「夠清楚」,
+    再清楚也不額外加分。reference 在 config 裡,現場依實測數值調整。
+    """
+    if reference <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, variance / reference))
+
+
 def score_detection(
     det: Detection, params: ScoringParams = DEFAULT_SCORING
 ) -> float:
@@ -86,12 +106,12 @@ def score_detection(
     dist = math.hypot(cx - 0.5, cy - 0.5)
     center_closeness = max(0.0, 1.0 - dist / _MAX_CENTER_DIST)
 
-    sharpness_placeholder = 0.0
+    sharpness = normalize_sharpness(det.sharpness, params.sharpness_reference)
 
     return (
         params.area_weight * area
         + params.center_weight * center_closeness
-        + params.sharpness_weight * sharpness_placeholder
+        + params.sharpness_weight * sharpness
     )
 
 

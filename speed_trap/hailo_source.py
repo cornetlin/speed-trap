@@ -33,6 +33,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from speed_trap.config import StationConfig
@@ -106,6 +107,11 @@ _CROP_MARGIN = 0.02
 # be OCR'd out of them.
 _MIN_CROP_PX = 16
 
+# 算清晰度前先把裁切圖縮到這個寬度。Laplacian 變異數會隨解析度變動,同一
+# 台車在大張裁切圖上算出來的值天生就比小張的高 —— 固定寬度之後,不同大小
+# 的裁切圖才可以互相比較。也順便讓這步的成本跟裁切大小無關(約 1 ms)。
+_SHARPNESS_WIDTH = 320
+
 # How often the pipeline health line is logged.
 _STATS_INTERVAL_S = 10.0
 
@@ -113,6 +119,38 @@ _STATS_INTERVAL_S = 10.0
 # 幾幀。設 2 秒:比 hailotracker 的 keep-tracked-frames 寬鬆,免得車子只是被
 # 短暫遮住就被算成兩台。
 _TRACK_IDLE_TIMEOUT_S = 2.0
+
+
+@dataclass(frozen=True)
+class _CropResult:
+    jpeg: bytes
+    width: int
+    height: int
+    sharpness: float
+
+
+def _crop_sharpness(crop_bgr: Any) -> float:
+    """Laplacian variance of a crop — higher means sharper.
+
+    Motion blur is the failure mode this is meant to catch: a car crossing the
+    frame at speed can be perfectly framed and still unreadable. Computed on a
+    fixed-width grayscale copy so values are comparable between a 300 px crop
+    of a distant car and a 900 px crop of a near one.
+    """
+    try:
+        gray = _cv2.cvtColor(crop_bgr, _cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        if width > _SHARPNESS_WIDTH:
+            scale = _SHARPNESS_WIDTH / width
+            gray = _cv2.resize(
+                gray,
+                (_SHARPNESS_WIDTH, max(1, int(height * scale))),
+                interpolation=_cv2.INTER_AREA,
+            )
+        return float(_cv2.Laplacian(gray, _cv2.CV_64F).var())
+    except Exception as exc:  # noqa: BLE001 - scoring must never kill the probe
+        _logger.debug("sharpness calculation failed: %s", exc)
+        return 0.0
 
 
 class _PipelineStats:
@@ -553,9 +591,9 @@ class HailoDetectionSource:
             track_id = int(track_objs[0].get_id()) if track_objs else -1
             self._stats.note_track_frame(track_id, frame_ns)
 
-            frame_jpeg = None
+            crop = None
             if frame_rgb is not None:
-                frame_jpeg = self._crop_and_encode_jpeg(frame_rgb, (x1, y1, x2, y2))
+                crop = self._crop_and_encode_jpeg(frame_rgb, (x1, y1, x2, y2))
 
             try:
                 self._queue.put_nowait(
@@ -565,7 +603,9 @@ class HailoDetectionSource:
                         bbox=(x1, y1, x2, y2),
                         confidence=float(det.get_confidence()),
                         frame_ns=frame_ns,
-                        frame_jpeg=frame_jpeg,
+                        frame_jpeg=crop.jpeg if crop else None,
+                        sharpness=crop.sharpness if crop else 0.0,
+                        crop_size=(crop.width, crop.height) if crop else None,
                     )
                 )
             except queue.Full:
@@ -591,7 +631,7 @@ class HailoDetectionSource:
         self,
         frame_rgb: Any,
         bbox: tuple[float, float, float, float],
-    ) -> bytes | None:
+    ) -> _CropResult | None:
         """Crop the bbox region out of an RGB frame and encode it as JPEG.
 
         Coordinates are normalised 0..1 relative to the detection frame, which
@@ -616,6 +656,7 @@ class HailoDetectionSource:
             h,
         )
         crop_bgr = _cv2.cvtColor(crop_rgb, _cv2.COLOR_RGB2BGR)
+        sharpness = _crop_sharpness(crop_bgr)
         ok, jpeg = _cv2.imencode(
             ".jpg",
             crop_bgr,
@@ -623,7 +664,12 @@ class HailoDetectionSource:
         )
         if not ok:
             return None
-        return bytes(jpeg)
+        return _CropResult(
+            jpeg=bytes(jpeg),
+            width=px2 - px1,
+            height=py2 - py1,
+            sharpness=sharpness,
+        )
 
     # --- gstreamer helpers ------------------------------------------------
 
