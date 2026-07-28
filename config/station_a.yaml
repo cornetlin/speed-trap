@@ -1,0 +1,61 @@
+station_id: station_a
+camera_source: /dev/video0
+# 相機實際擷取解析度與張數。車輛偵測會另外縮到 hailo_input_size 餵 Hailo,
+# 但裁切車輛區域是在這個原始解析度上做的 —— 車牌的像素數由這裡決定。
+frame_width: 1920
+frame_height: 1080
+frame_fps: 30
+# HEF 編譯時固定的輸入邊長(正方形)。換模型才需要動,不是相機解析度。
+hailo_input_size: 640
+# Hailo-8 / Hailo-8L 預設(Pi 5 + AI HAT+,hailo-models / hailo-tappas-core apt 套件提供)
+# 用 _h8 後綴對應 Hailo-8 晶片(AI HAT+ 26 TOPS),用 _h8l 對應 Hailo-8L(13 TOPS)。
+# 跑錯版本仍能執行但 HailoRT 會發 warning + 效能下降。`hailortcli scan` 看晶片型號。
+# 換不同 HEF 時 hailofilter_so_path 不用改(libyolo_hailortpp_post.so 通用 v6/v8)
+hef_path: /usr/share/hailo-models/yolov6n_h8.hef
+hailofilter_so_path: /usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so
+vehicle_classes:
+  - car
+  - truck
+  - bus
+  - motorcycle
+trigger_line_y: 0.7
+mqtt_broker: null
+mqtt_topic: speedtrap/station_a/passage
+log_level: INFO
+
+# === Phase A — Plate OCR experiments ===
+# 切換 OCR backend / 模型 / 前處理,不用改 code,改 YAML 即可
+#
+# ocr_backend:
+#   "fast-plate-ocr"  → 預設,輕量 ONNX 模型(~10 MB),Pi CPU 10-30 ms
+#   "paddleocr"       → PaddleOCR(~150 MB),中文系強;需 pip install paddleocr
+#   "noop"            → 完全關閉 OCR(只跑車輛偵測,passage 事件無 plate_text)
+#
+# ocr_model_name (僅 fast-plate-ocr 有效;PaddleOCR 用 ocr_backend 切):
+#   hub 模型(自動下載):
+#     "global-plates-mobile-vit-v2-model"   → 全球(預設,對台灣弱 ~10%)
+#     "european-plates-mobile-vit-v2-model" → 歐洲(字符集相近)
+#     "cct-xs-v1-global-model"              → 新版 CCT 架構
+#   自訓 ONNX(W3+ Phase B v2 學生訓練產出):
+#     "/home/kevin30/speed-trap/models/taiwan_ocr.onnx"
+#     ↑ 絕對路徑,搭配下方 ocr_model_config 指向對應的 plate_config.yaml
+#
+# ocr_model_config: 自訓 ONNX 時必填,指向 plate_config.yaml(訓練輸出有);
+#                   hub 模型留 null 即可
+#
+# ocr_plate_detector_path: W3 v2 cascade — W2 訓的車牌偵測模型 (.pt or .onnx)
+#   設定後系統會先在 Hailo 切出的車輛 crop 內找車牌 bbox,再 crop 餵 OCR。
+#   不設則直接把整輛車 crop 丟給 OCR(經驗上會讀很糟)。
+#   例: /home/kevin30/speed-trap/models/plate_detector.pt
+#
+# ocr_preprocess: true 會在 OCR 前做 CLAHE 對比增強 + unsharp,可能救回低對比車牌
+#
+# save_debug_crops: false 把每次的 vehicle/plate/preproc crop 存到
+#   ~/speedtrap_debug/00001_vehicle.jpg 等(SD 卡上,重開機不會消失),
+#   供事後檢查 cascade 每階段是否切對。Production 應為 false。
+ocr_backend: fast-plate-ocr
+ocr_model_name: /home/kevin30/speed-trap/models/best.onnx
+ocr_model_config: /home/kevin30/speed-trap/models/plate_config.yaml
+ocr_plate_detector_path: /home/kevin30/speed-trap/models/plate_detector.pt
+ocr_preprocess: false
+save_debug_crops: true
