@@ -556,6 +556,10 @@ class HailoDetectionSource:
         if not detections:
             return Gst.PadProbeReturn.OK
 
+        # 所有下游數字都建立在這道過濾之上:Detection、每台車幀數統計、
+        # 通行事件。行人與盆栽拿得到 hailotracker 的 track id,但到不了
+        # 這裡以下的任何一行。(RTSP 上還是看得到它們的框,因為
+        # hailooverlay 畫的是過濾前的全部偵測。)
         vehicles = [d for d in detections if d.get_label() in self._vehicle_classes]
         if not vehicles:
             return Gst.PadProbeReturn.OK
