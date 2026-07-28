@@ -32,7 +32,11 @@ class PassageRecord:
     """一台車的一行紀錄。欄位順序就是 CSV 的欄位順序。"""
 
     seq: int = 0
+    # timestamp_iso  = 這一行被寫下來的時間(結算時刻,比擷取晚約 3 秒)
+    # capture_wall_iso = 選中那一幀的影像擷取時間 —— 要算通行時間、跨站
+    #   速度時看這一欄,不要看 timestamp_iso。
     timestamp_iso: str = ""
+    capture_wall_iso: str = ""
     station_id: str = ""
     track_id: int = -1
     label: str = ""
@@ -51,6 +55,8 @@ class PassageRecord:
     bbox_y2: float = 0.0
     touches_edge: int = 0
     edge_distance: float = 0.0
+    # 單調時鐘,只在同一次執行內有意義(量間隔用)。跨執行、跨機器請用
+    # capture_wall_iso。
     frame_ns: int = 0
     # --- 尺寸:這是判斷車牌讀不讀得出來的關鍵數字 ---
     vehicle_crop_w: int = 0

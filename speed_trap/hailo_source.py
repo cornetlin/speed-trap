@@ -36,6 +36,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from speed_trap.clock import wall_clock_ns
 from speed_trap.config import StationConfig
 from speed_trap.tracker import Detection
 
@@ -564,7 +565,10 @@ class HailoDetectionSource:
         if not vehicles:
             return Gst.PadProbeReturn.OK
 
+        # 兩種時鐘取自同一瞬間,必須相鄰兩行,中間不要插任何工作 ——
+        # 它們是同一個時刻的兩種表示法,兩者要對得起來。
         frame_ns = time.monotonic_ns()
+        capture_wall_ns = wall_clock_ns()
         pts = self._buffer_pts(buffer)
 
         # Prefer the full-resolution frame that carries the same PTS. Falling
@@ -607,6 +611,7 @@ class HailoDetectionSource:
                         bbox=(x1, y1, x2, y2),
                         confidence=float(det.get_confidence()),
                         frame_ns=frame_ns,
+                        capture_wall_ns=capture_wall_ns,
                         frame_jpeg=crop.jpeg if crop else None,
                         sharpness=crop.sharpness if crop else 0.0,
                         crop_size=(crop.width, crop.height) if crop else None,

@@ -17,6 +17,9 @@ class PassageEvent:
     station_id: str
     track_id: int
     label: str
+    # 影像擷取當下的真實時間,UTC epoch 奈秒(不是單調時鐘)。改用真實時間
+    # 的原因:單調時鐘的起點是各台機器自己的開機時刻,重開機後前後兩批資料
+    # 對不起來,A、B 兩站相減算速度也沒有意義。
     timestamp_ns: int
     confidence: float
     image_sha256: str

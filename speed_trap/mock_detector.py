@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from speed_trap.clock import wall_clock_ns
 from speed_trap.tracker import Detection
 
 
@@ -60,6 +61,7 @@ class MockDetector:
                 bbox=(x1, y1, x2, y2),
                 confidence=self._confidence,
                 frame_ns=frame_ns,
+                capture_wall_ns=wall_clock_ns(),
                 frame_jpeg=None,
             )
         ]

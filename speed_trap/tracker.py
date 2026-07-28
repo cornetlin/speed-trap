@@ -30,8 +30,15 @@ class Detection:
     label: str
     bbox: tuple[float, float, float, float]
     confidence: float
+    # frame_ns:單調時鐘(time.monotonic_ns)。只能用來量「經過多久」——
+    #   本檔的 last_seen_ns / prune_stale、重複判定視窗、幀率統計都用它。
+    #   它的起點是這台機器的開機時刻,不能對外、不能跨機器相減。
     frame_ns: int
     frame_jpeg: bytes | None
+    # capture_wall_ns:同一瞬間的真實時間(UTC epoch 奈秒)。對外的時間戳
+    #   一律用它 —— 通行事件、CSV 的擷取時間、日後 A/B 兩站相減算速度。
+    #   0 表示來源沒有提供。
+    capture_wall_ns: int = 0
     # 裁切圖的 Laplacian 變異數,由來源在裁切當下算好(那裡本來就有未壓縮
     # 的像素,不必為了評分再解一次 JPEG)。0.0 = 沒算(來源未提供)。
     sharpness: float = 0.0

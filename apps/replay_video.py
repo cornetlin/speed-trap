@@ -66,7 +66,7 @@ def run_replay(
                         station_id=config.station_id,
                         track_id=det.track_id,
                         label=det.label,
-                        timestamp_ns=det.frame_ns,
+                        timestamp_ns=det.capture_wall_ns,
                         confidence=det.confidence,
                         image_sha256=_hash_image(det.frame_jpeg),
                     )

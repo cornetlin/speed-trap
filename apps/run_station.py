@@ -22,6 +22,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Protocol
 
+from speed_trap.clock import log_clock_status, wall_ns_to_iso
 from speed_trap.config import StationConfig, load_config
 from speed_trap.event import EventSink, PassageEvent, make_sink
 from speed_trap.hailo_source import HailoDetectionSource
@@ -190,7 +191,8 @@ def _settle_track(
         station_id=config.station_id,
         track_id=track.track_id,
         label=track.label,
-        timestamp_ns=det.frame_ns,
+        # 對外的時間戳用真實時間,不是單調時鐘(見 speed_trap.clock)。
+        timestamp_ns=det.capture_wall_ns,
         confidence=det.confidence,
         image_sha256=_hash_image(det.frame_jpeg),
         plate_text=plate_text,
@@ -249,6 +251,7 @@ def _make_record(
     plate_wh = attempt.plate_wh or (0, 0)
     reading = attempt.reading
     return PassageRecord(
+        capture_wall_iso=wall_ns_to_iso(det.capture_wall_ns),
         station_id=config.station_id,
         track_id=track.track_id,
         label=track.label,
@@ -316,6 +319,11 @@ def _settle_finished(
                 best = track.best_frame()
                 passage_log.log(
                     PassageRecord(
+                        capture_wall_iso=(
+                            wall_ns_to_iso(best.detection.capture_wall_ns)
+                            if best
+                            else ""
+                        ),
                         station_id=config.station_id,
                         track_id=track.track_id,
                         label=track.label,
@@ -432,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # 時間戳的可信度先講清楚:沒對到時的話,通行時間與跨站速度都不能用。
+    log_clock_status()
 
     sink = make_sink(config)
     source = HailoDetectionSource(config)
