@@ -23,6 +23,10 @@ class PassageEvent:
     plate_text: str | None = None
     plate_confidence: float | None = None
     plate_is_taiwan_format: bool | None = None
+    # 這筆紀錄的可信度有疑慮,下游應該讓人看過。原因見 review_reason
+    # (例如整條 track 每一幀都碰到畫面邊界)。
+    needs_review: bool = False
+    review_reason: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -55,18 +59,34 @@ class SQLiteEventSink(EventSink):
             image_sha256            TEXT    NOT NULL,
             plate_text              TEXT,
             plate_confidence        REAL,
-            plate_is_taiwan_format  INTEGER
+            plate_is_taiwan_format  INTEGER,
+            needs_review            INTEGER,
+            review_reason           TEXT
         )
     """
+
+    # 舊資料庫沒有這兩欄,開啟時補上,免得 INSERT 欄位數對不起來。
+    _ADDED_COLUMNS = (
+        ("needs_review", "INTEGER"),
+        ("review_reason", "TEXT"),
+    )
 
     def __init__(self, db_path: Path) -> None:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute(self._SCHEMA)
+        existing = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(events)")
+        }
+        for name, sql_type in self._ADDED_COLUMNS:
+            if name not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE events ADD COLUMN {name} {sql_type}"
+                )
         self._conn.commit()
 
     def emit(self, event: PassageEvent) -> None:
         self._conn.execute(
-            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.station_id,
                 event.track_id,
@@ -77,6 +97,8 @@ class SQLiteEventSink(EventSink):
                 event.plate_text,
                 event.plate_confidence,
                 event.plate_is_taiwan_format,
+                int(event.needs_review),
+                event.review_reason,
             ),
         )
         self._conn.commit()
