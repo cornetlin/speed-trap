@@ -10,11 +10,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 authors = [{ name = "Lin Shu-Hsien" }]
+# 必要依賴。要跟 requirements.txt 保持一致 —— pip install -e . 與
+# pip install -r requirements.txt 必須裝出相同的環境。
+# PyGObject(gi)與 hailo 不在此列:兩者走 apt,不走 pip,理由見 requirements.txt。
 dependencies = [
     "paho-mqtt",
     "numpy",
     "opencv-python-headless",
     "pyyaml",
+    "fast-plate-ocr",
+    "ultralytics",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +28,13 @@ dev = [
     "pytest-cov",
     "ruff",
     "mypy",
+    "types-PyYAML",
+]
+# 可選的 OCR 後端。PaddleOCR 約 150 MB,只有 config 設 ocr_backend: paddleocr
+# 時才需要,不列為必要依賴。啟用方式見 README。
+paddle = [
+    "paddleocr",
+    "paddlepaddle",   # PaddleOCR 的推論後端,兩個都要才跑得起來
 ]
 
 [tool.setuptools.packages.find]

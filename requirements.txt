@@ -1,6 +1,29 @@
+# 必要依賴。要與 pyproject.toml 的 [project].dependencies 保持一致 ——
+# pip install -e . 與 pip install -r requirements.txt 必須裝出相同的環境。
+
+# 雙站階段的 MQTT 通訊。目前 MqttEventSink 還是 log stub,程式裡尚未
+# import paho,先保留:A/B 兩站接上 broker 時就會用到。
 paho-mqtt
+
 numpy
 opencv-python-headless
 pyyaml
+
+# OCR 與車牌偵測(W3 三段式 cascade 的第二、三段,都跑在 Pi CPU 上)
 fast-plate-ocr
 ultralytics
+
+# =====================================================================
+# 以下兩個「不要」用 pip 裝,pip 上沒有能用的版本:
+#
+#   PyGObject (import gi)  → sudo apt install python3-gi gir1.2-gst-plugins-base-1.0
+#   hailo (import hailo)   → 隨 Hailo runtime / hailo-tappas-core 的 apt 套件安裝
+#
+# 兩者都是系統層套件,venv 要用的話建 venv 時加 --system-site-packages。
+# 同理 picamera2 也走 apt(見 CLAUDE.md)。
+# 這三個缺席時 speed_trap 仍可 import,只有實際跑 HailoDetectionSource
+# 才會拋出說明清楚的 RuntimeError —— PC 上跑 pytest 不需要它們。
+#
+# 可選的 OCR 後端 PaddleOCR(約 150 MB)不在這裡,見 README:
+#   pip install -e ".[paddle]"
+# =====================================================================

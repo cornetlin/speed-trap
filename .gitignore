@@ -11,3 +11,11 @@ speedtrap_debug/
 *.db
 *.7z
 *.zip
+
+# 車牌影像絕對不能進版控 —— 這個 repo 是公開的,而車牌號碼在台灣屬於個資,
+# 一旦 push 上去就進了 git 歷史,砍掉檔案也救不回來。
+# 預設輸出路徑(passage_crop_dir、debug crops)都在 repo 外,但只要有人把
+# config 的輸出目錄改到專案裡,下一次 git add -A 就會全部帶上去。
+*.jpg
+*.jpeg
+*.png
