@@ -1,6 +1,13 @@
+.venv/
 __pycache__/
-*.pyc
-*.jpg
+*.py[cod]
+models/
+samples/
+*.hef
+*.onnx
+*.pt
+speedtrap_debug/
 *.csv
 *.db
-.venv/
+*.7z
+*.zip
