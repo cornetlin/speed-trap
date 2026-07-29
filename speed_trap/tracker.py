@@ -42,6 +42,9 @@ class Detection:
     # 裁切圖的 Laplacian 變異數,由來源在裁切當下算好(那裡本來就有未壓縮
     # 的像素,不必為了評分再解一次 JPEG)。0.0 = 沒算(來源未提供)。
     sharpness: float = 0.0
+    # True 表示 sharpness 這個 0.0 是計算失敗的預設值,不是「真的很糊」。
+    # 兩者對評分的影響一樣(清晰度項歸零),但診斷時必須分得出來。
+    sharpness_failed: bool = False
     crop_size: tuple[int, int] | None = None
 
 

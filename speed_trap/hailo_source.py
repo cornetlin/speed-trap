@@ -38,6 +38,7 @@ from typing import Any
 
 from speed_trap.clock import wall_clock_ns
 from speed_trap.config import StationConfig
+from speed_trap.log_throttle import ThrottledWarning
 from speed_trap.tracker import Detection
 
 _logger = logging.getLogger(__name__)
@@ -128,15 +129,24 @@ class _CropResult:
     width: int
     height: int
     sharpness: float
+    sharpness_failed: bool = False
 
 
-def _crop_sharpness(crop_bgr: Any) -> float:
+# 清晰度算不出來時 sharpness 會退成 0.0,評分就只剩面積與置中 —— 那正是
+# 這次剛修掉的選錯幀問題,而且不會有任何徵兆。所以絕不能靜默:一定要記,
+# 而且要在 CSV 上標出哪些幀吃到了這個預設值。
+_sharpness_failures = ThrottledWarning(_logger)
+
+
+def _crop_sharpness(crop_bgr: Any) -> tuple[float, bool]:
     """Laplacian variance of a crop — higher means sharper.
 
     Motion blur is the failure mode this is meant to catch: a car crossing the
     frame at speed can be perfectly framed and still unreadable. Computed on a
     fixed-width grayscale copy so values are comparable between a 300 px crop
     of a distant car and a 900 px crop of a near one.
+
+    回傳 ``(變異數, 是否計算失敗)``。失敗時變異數為 0.0。
     """
     try:
         gray = _cv2.cvtColor(crop_bgr, _cv2.COLOR_BGR2GRAY)
@@ -148,10 +158,15 @@ def _crop_sharpness(crop_bgr: Any) -> float:
                 (_SHARPNESS_WIDTH, max(1, int(height * scale))),
                 interpolation=_cv2.INTER_AREA,
             )
-        return float(_cv2.Laplacian(gray, _cv2.CV_64F).var())
+        return float(_cv2.Laplacian(gray, _cv2.CV_64F).var()), False
     except Exception as exc:  # noqa: BLE001 - scoring must never kill the probe
-        _logger.debug("sharpness calculation failed: %s", exc)
-        return 0.0
+        _sharpness_failures.warn(
+            "清晰度計算失敗,該幀的 sharpness 退回 0.0,最佳幀評分等於只看"
+            "面積與置中:%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return 0.0, True
 
 
 class _PipelineStats:
@@ -614,6 +629,7 @@ class HailoDetectionSource:
                         capture_wall_ns=capture_wall_ns,
                         frame_jpeg=crop.jpeg if crop else None,
                         sharpness=crop.sharpness if crop else 0.0,
+                        sharpness_failed=bool(crop and crop.sharpness_failed),
                         crop_size=(crop.width, crop.height) if crop else None,
                     )
                 )
@@ -665,7 +681,7 @@ class HailoDetectionSource:
             h,
         )
         crop_bgr = _cv2.cvtColor(crop_rgb, _cv2.COLOR_RGB2BGR)
-        sharpness = _crop_sharpness(crop_bgr)
+        sharpness, sharpness_failed = _crop_sharpness(crop_bgr)
         ok, jpeg = _cv2.imencode(
             ".jpg",
             crop_bgr,
@@ -678,6 +694,7 @@ class HailoDetectionSource:
             width=px2 - px1,
             height=py2 - py1,
             sharpness=sharpness,
+            sharpness_failed=sharpness_failed,
         )
 
     # --- gstreamer helpers ------------------------------------------------

@@ -48,6 +48,9 @@ class PassageRecord:
     chosen_frame_index: int = -1
     chosen_score: float = 0.0
     chosen_sharpness: float = 0.0
+    # 1 = chosen_sharpness 的 0.0 是計算失敗的預設值,不是真的很糊。這種
+    # 幀的評分等於只看面積與置中,挑幀結果不可信,分析時要排除。
+    chosen_sharpness_failed: int = 0
     chosen_from_edge_fallback: int = 0
     bbox_x1: float = 0.0
     bbox_y1: float = 0.0

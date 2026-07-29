@@ -261,6 +261,7 @@ def _make_record(
         chosen_frame_index=best.frame_index,
         chosen_score=round(best.score, 5),
         chosen_sharpness=round(det.sharpness, 1),
+        chosen_sharpness_failed=int(det.sharpness_failed),
         chosen_from_edge_fallback=int(best.from_edge_fallback),
         bbox_x1=round(det.bbox[0], 5),
         bbox_y1=round(det.bbox[1], 5),

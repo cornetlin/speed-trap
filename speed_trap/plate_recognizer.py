@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from speed_trap.config import StationConfig
+from speed_trap.log_throttle import ThrottledWarning
 from speed_trap.plate_format import is_valid_taiwan_plate, normalize_plate
 
 _logger = logging.getLogger(__name__)
@@ -54,6 +55,12 @@ DEFAULT_MODEL = "global-plates-mobile-vit-v2-model"
 DEFAULT_DEBUG_DIR = os.path.join(os.path.expanduser("~"), "speedtrap_debug")
 
 
+# 尺寸算不出來時 CSV 的 vehicle_crop / plate_box 會變成 0,而那兩個數字正是
+# 判斷「車牌讀不出來是不是因為裁切太小」的依據。靜默失敗會讓診斷資料看起來
+# 像是「裁切尺寸為零」,而不是「量不到」。
+_dimension_failures = ThrottledWarning(_logger)
+
+
 def _jpeg_dimensions(jpeg_bytes: bytes) -> tuple[int, int] | None:
     """(width, height) of a JPEG in pixels, or None if it can't be decoded."""
     if _IMPORT_ERROR is not None or not jpeg_bytes:
@@ -61,10 +68,19 @@ def _jpeg_dimensions(jpeg_bytes: bytes) -> tuple[int, int] | None:
     try:
         img = _cv2.imdecode(_np.frombuffer(jpeg_bytes, _np.uint8), _cv2.IMREAD_COLOR)
         if img is None:
+            _dimension_failures.warn(
+                "無法解碼 JPEG 取得尺寸(%d bytes),CSV 的裁切尺寸欄位會是 0",
+                len(jpeg_bytes),
+            )
             return None
         height, width = img.shape[:2]
         return int(width), int(height)
-    except Exception:  # noqa: BLE001 - diagnostics must never break OCR
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break OCR
+        _dimension_failures.warn(
+            "取得裁切圖尺寸失敗,CSV 的裁切尺寸欄位會是 0:%s: %s",
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
