@@ -192,32 +192,33 @@ def test_make_recognizer_noop_backend() -> None:
     assert isinstance(rec, NoopPlateRecognizer)
 
 
-def test_make_recognizer_fast_plate_ocr_falls_back_when_missing() -> None:
-    """If fast-plate-ocr isn't installed on the dev machine, factory
-    falls back to NoopPlateRecognizer (with a warning) instead of crashing."""
+def test_make_recognizer_fast_plate_ocr_raises_when_missing() -> None:
+    """行為已變更:初始化失敗一律中止,不再靜默退回 noop。
+
+    原本失敗只記一則 WARNING 就繼續跑,結果是整場現場實驗產出一份沒有
+    車牌的 CSV,跑完才發現。詳細的簽章相容性測試在
+    tests/test_plate_recognizer_loading.py。
+    """
     if pr._IMPORT_ERROR is None:
         pytest.skip("fast-plate-ocr is installed; can't test the missing-deps path")
-    rec = pr.make_recognizer(_config(ocr_backend="fast-plate-ocr"))
-    assert isinstance(rec, NoopPlateRecognizer)
+    with pytest.raises(pr.OcrBackendUnavailable):
+        pr.make_recognizer(_config(ocr_backend="fast-plate-ocr"))
 
 
-def test_make_recognizer_paddleocr_falls_back_when_missing() -> None:
-    """Same fallback story for paddleocr backend."""
+def test_make_recognizer_paddleocr_raises_when_missing() -> None:
+    """Same story for the paddleocr backend."""
     try:
         from speed_trap.paddle_recognizer import _IMPORT_ERROR as _paddle_err
     except ImportError:
         pytest.skip("paddle_recognizer module not importable on this machine")
     if _paddle_err is None:
         pytest.skip("paddleocr is installed; can't test the missing-deps path")
-    rec = pr.make_recognizer(_config(ocr_backend="paddleocr"))
-    assert isinstance(rec, NoopPlateRecognizer)
+    with pytest.raises(pr.OcrBackendUnavailable):
+        pr.make_recognizer(_config(ocr_backend="paddleocr"))
 
 
-def test_make_recognizer_unknown_backend_returns_noop(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Defensive: config validation should catch unknown backends, but if a
-    test somehow bypasses validation the factory still returns Noop."""
+def test_make_recognizer_unknown_backend_raises() -> None:
+    """只有 config 明確寫 noop 才允許假後端,認不得的值一律中止。"""
     # We can't construct StationConfig with an invalid backend (it raises),
     # so use a SimpleNamespace stand-in.
     from types import SimpleNamespace
@@ -227,8 +228,8 @@ def test_make_recognizer_unknown_backend_returns_noop(
         ocr_model_name="x",
         ocr_preprocess=False,
     )
-    rec = pr.make_recognizer(fake_config)  # type: ignore[arg-type]
-    assert isinstance(rec, NoopPlateRecognizer)
+    with pytest.raises(pr.OcrBackendUnavailable):
+        pr.make_recognizer(fake_config)  # type: ignore[arg-type]
 
 
 def test_preprocess_helper_handles_empty_bytes() -> None:
@@ -267,38 +268,55 @@ def test_is_path_like_empty() -> None:
     assert pr._is_path_like("") is False
 
 
-def test_make_recognizer_passes_model_config_through() -> None:
-    """Factory should hand ocr_model_config to PlateRecognizer constructor.
-    When fast-plate-ocr isn't installed we fall back to Noop (no crash)."""
-    if pr._IMPORT_ERROR is None:
-        pytest.skip("fast-plate-ocr installed; can't exercise the deps-missing branch")
-    cfg = _config(
-        ocr_backend="fast-plate-ocr",
-        ocr_model_name="/path/to/custom.onnx",
-        ocr_model_config="/path/to/plate_config.yaml",
+def _capture_recognizer_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """攔下 PlateRecognizer 的建構參數,不真的載入模型。
+
+    原本這兩個測試只斷言「沒裝 fast-plate-ocr 時會退回 Noop」,等於什麼
+    都沒驗到(註解自己也承認)。現在直接檢查 config 的欄位有沒有送到
+    建構子。
+    """
+    captured: dict[str, object] = {}
+
+    def fake_recognizer(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pr, "PlateRecognizer", fake_recognizer)
+    return captured
+
+
+def test_make_recognizer_passes_model_config_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Factory should hand ocr_model_config to PlateRecognizer constructor."""
+    captured = _capture_recognizer_kwargs(monkeypatch)
+    pr.make_recognizer(
+        _config(
+            ocr_backend="fast-plate-ocr",
+            ocr_model_name="/path/to/custom.onnx",
+            ocr_model_config="/path/to/plate_config.yaml",
+        )
     )
-    rec = pr.make_recognizer(cfg)
-    # On a machine without fast-plate-ocr installed, the construction attempt
-    # raises RuntimeError and we return Noop. The important thing is no crash.
-    assert isinstance(rec, NoopPlateRecognizer)
+    assert captured["model_name"] == "/path/to/custom.onnx"
+    assert captured["model_config"] == "/path/to/plate_config.yaml"
 
 
-def test_make_recognizer_passes_cascade_fields_through() -> None:
+def test_make_recognizer_passes_cascade_fields_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """v1.6.0 cascade fields (plate_detector_path + save_debug_crops) must
     reach PlateRecognizer's constructor."""
-    if pr._IMPORT_ERROR is None:
-        pytest.skip("fast-plate-ocr installed; can't exercise the deps-missing branch")
-    cfg = _config(
-        ocr_backend="fast-plate-ocr",
-        ocr_model_name="/path/to/custom.onnx",
-        ocr_plate_detector_path="/path/to/plate_detector.pt",
-        save_debug_crops=True,
+    captured = _capture_recognizer_kwargs(monkeypatch)
+    pr.make_recognizer(
+        _config(
+            ocr_backend="fast-plate-ocr",
+            ocr_model_name="/path/to/custom.onnx",
+            ocr_plate_detector_path="/path/to/plate_detector.pt",
+            save_debug_crops=True,
+        )
     )
-    # Without fast-plate-ocr installed the factory falls back to Noop,
-    # so we can only assert it didn't crash. The real factory wiring is
-    # exercised by integration tests on the Pi.
-    rec = pr.make_recognizer(cfg)
-    assert isinstance(rec, NoopPlateRecognizer)
+    assert captured["plate_detector_path"] == "/path/to/plate_detector.pt"
+    assert captured["save_debug_crops"] is True
 
 
 def test_noop_recognizer_has_no_plate_detector() -> None:

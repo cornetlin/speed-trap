@@ -17,6 +17,8 @@ try/except so that:
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
+import inspect
 import logging
 import os
 import tempfile
@@ -37,7 +39,18 @@ _np: Any = None
 try:
     import cv2 as _cv2_real
     import numpy as _np_real
-    from fast_plate_ocr import LicensePlateRecognizer as _LPR_real
+    import fast_plate_ocr as _fpo
+
+    # 上游把 ONNXPlateRecognizer 改名成 LicensePlateRecognizer。兩個名字都試,
+    # 順序是新的優先 —— 有些版本兩個都在(舊名是別名)。
+    _LPR_real = getattr(_fpo, "LicensePlateRecognizer", None) or getattr(
+        _fpo, "ONNXPlateRecognizer", None
+    )
+    if _LPR_real is None:
+        raise ImportError(
+            "fast_plate_ocr 裡找不到 LicensePlateRecognizer 或 "
+            "ONNXPlateRecognizer,套件結構可能又變了"
+        )
 
     _cv2 = _cv2_real
     _np = _np_real
@@ -45,6 +58,22 @@ try:
     _IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - depends on env
     _IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+
+
+class OcrBackendUnavailable(RuntimeError):
+    """config 指定了某個 OCR 後端,但那個後端起不來。
+
+    這是致命錯誤,不是警告 —— 靜默退回假後端的話,整場現場實驗會產出一份
+    全空的 CSV,而且要跑完才發現。一次實驗的成本是一整個上午。
+    """
+
+
+def installed_version(package: str) -> str:
+    """已安裝的套件版本,查不到就回 'unknown'。"""
+    try:
+        return importlib.metadata.version(package)
+    except Exception:  # noqa: BLE001 - metadata 查詢不該影響主流程
+        return "unknown"
 
 
 DEFAULT_MODEL = "global-plates-mobile-vit-v2-model"
@@ -98,53 +127,162 @@ def _is_path_like(s: str) -> bool:
     return s.lower().endswith(".onnx")
 
 
-def _load_lpr(
-    model_or_path: str, config_path: str | None
-) -> Any:
-    """Instantiate fast-plate-ocr's LicensePlateRecognizer.
+# fast-plate-ocr 每次改版都會換建構子的參數名稱,而且類別本身也改過名
+# (ONNXPlateRecognizer -> LicensePlateRecognizer)。與其硬寫一串候選呼叫再
+# 用 try/except 一個個試 —— 那樣既認不得沒見過的版本,失敗訊息也只剩最後
+# 一個例外 —— 改成先用 inspect.signature 讀出「實際安裝的這一版」接受哪些
+# 參數,再據此組裝呼叫。新版只要沿用其中一個名稱就會自動相容。
+#
+# 每一組是「我們要傳的東西」對應到各版本用過的參數名,依偏好排序。
+_HUB_MODEL_PARAMS = ("hub_ocr_model", "model_name", "model")
+_ONNX_PATH_PARAMS = ("onnx_model_path", "model_path", "onnx_path")
+_CONFIG_PATH_PARAMS = (
+    "plate_config_path",
+    "config_file",
+    "model_config_path",
+    "plate_config",
+)
 
-    Two modes:
-    1. Hub model: model_or_path is a name like "global-plates-mobile-vit-v2-model".
-       Pass straight through; fast-plate-ocr downloads from its hub.
-    2. Custom ONNX: model_or_path is a filesystem path to a .onnx file. Try
-       the various parameter naming conventions fast-plate-ocr has used across
-       versions (different keyword args in 0.4 vs 0.5 vs 0.7).
-    """
-    if not _is_path_like(model_or_path):
-        return _LicensePlateRecognizer(model_or_path)
 
-    onnx_path = model_or_path
-    cfg_path = config_path
+@dataclass(frozen=True)
+class _LoadPlan:
+    """依實際簽章決定要怎麼呼叫建構子。"""
 
-    # Versions of fast-plate-ocr have used different kwarg names for custom
-    # ONNX loading. Try the most likely combinations.
-    attempts: list[dict[str, str | None]] = [
-        # Newer (0.5+): explicit onnx+config keywords
-        {"onnx_model_path": onnx_path, "plate_config_path": cfg_path},
-        {"model_path": onnx_path, "model_config_path": cfg_path},
-        # Older shape: positional path + kw for config
-        {"hub_ocr_model": onnx_path, "plate_config_path": cfg_path},
-        # Last resort: pass path positionally (some versions accept it)
-        {"model_name": onnx_path},
+    kwargs: dict[str, str]
+    description: str      # log 用,說明比對到哪一種簽章
+
+
+def _accepted_params(target: Any) -> dict[str, inspect.Parameter]:
+    """建構子接受的具名參數(排除 *args / **kwargs / self)。"""
+    parameters = inspect.signature(target).parameters
+    return {
+        name: param
+        for name, param in parameters.items()
+        if name != "self"
+        and param.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    }
+
+
+def _first_accepted(
+    candidates: tuple[str, ...], accepted: dict[str, inspect.Parameter]
+) -> str | None:
+    for name in candidates:
+        if name in accepted:
+            return name
+    return None
+
+
+def _plan_load(
+    target: Any, model_or_path: str, config_path: str | None
+) -> _LoadPlan:
+    """讀出實際簽章,決定要傳哪些參數。認不得就丟出說明清楚的錯誤。"""
+    accepted = _accepted_params(target)
+    available = ", ".join(accepted) or "(無具名參數)"
+
+    if _is_path_like(model_or_path):
+        onnx_param = _first_accepted(_ONNX_PATH_PARAMS, accepted)
+        if onnx_param is None:
+            # 有些版本沒有專門的 onnx 參數,自訓模型是從 hub 參數傳路徑進去。
+            onnx_param = _first_accepted(_HUB_MODEL_PARAMS, accepted)
+            if onnx_param is None:
+                raise OcrBackendUnavailable(
+                    f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
+                    f"{target.__name__} 建構子沒有任何認得的模型路徑參數。"
+                    f"實際接受的參數:{available}。"
+                    f"預期其中之一:{_ONNX_PATH_PARAMS + _HUB_MODEL_PARAMS}"
+                )
+        kwargs = {onnx_param: model_or_path}
+        description = f"自訓 ONNX,{onnx_param}="
+
+        config_param = _first_accepted(_CONFIG_PATH_PARAMS, accepted)
+        if config_path:
+            if config_param is None:
+                raise OcrBackendUnavailable(
+                    f"config 指定了 ocr_model_config={config_path!r},但 "
+                    f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
+                    f"{target.__name__} 建構子沒有對應參數。"
+                    f"實際接受的參數:{available}"
+                )
+            kwargs[config_param] = config_path
+            description += f" + {config_param}="
+        elif config_param is not None and _is_required(accepted[config_param]):
+            raise OcrBackendUnavailable(
+                f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
+                f"{target.__name__} 要求 {config_param},但 config 的 "
+                "ocr_model_config 是空的。自訓 ONNX 必須一併指定 "
+                "plate_config.yaml"
+            )
+    else:
+        hub_param = _first_accepted(_HUB_MODEL_PARAMS, accepted)
+        if hub_param is None:
+            raise OcrBackendUnavailable(
+                f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
+                f"{target.__name__} 建構子沒有任何認得的 hub 模型參數。"
+                f"實際接受的參數:{available}。"
+                f"預期其中之一:{_HUB_MODEL_PARAMS}"
+            )
+        kwargs = {hub_param: model_or_path}
+        description = f"hub 模型,{hub_param}="
+
+    # 有些版本即使走自訂 ONNX 的路,模型名稱那個參數仍然是必填(舊的
+    # ONNXPlateRecognizer 就是這樣)。這種情況把同一個識別字串一併補上,
+    # 不要因為填不滿就放棄 —— 真的不合法的話,建構子自己會報錯,那時的
+    # 訊息比我們猜的準。
+    for name in _HUB_MODEL_PARAMS:
+        if name in accepted and name not in kwargs and _is_required(accepted[name]):
+            kwargs[name] = model_or_path
+            description += f" + {name}="
+
+    missing = [
+        name
+        for name, param in accepted.items()
+        if _is_required(param) and name not in kwargs
     ]
+    if missing:
+        raise OcrBackendUnavailable(
+            f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
+            f"{target.__name__} 還有我們填不了的必填參數:{missing}。"
+            f"實際接受的參數:{available}"
+        )
 
-    last_err: Exception | None = None
-    for kwargs in attempts:
-        # strip Nones (config_path may be missing)
-        clean = {k: v for k, v in kwargs.items() if v is not None}
-        try:
-            return _LicensePlateRecognizer(**clean)
-        except (TypeError, ValueError) as exc:
-            last_err = exc
-            continue
-        except Exception as exc:  # noqa: BLE001 - genuinely don't know what's raised
-            last_err = exc
-            continue
+    return _LoadPlan(kwargs=kwargs, description=description)
 
-    raise RuntimeError(
-        f"Could not load custom ONNX {onnx_path!r} via any known "
-        f"fast-plate-ocr API. Last error: {last_err}"
+
+def _is_required(param: inspect.Parameter) -> bool:
+    return param.default is inspect.Parameter.empty
+
+
+def _load_lpr(model_or_path: str, config_path: str | None) -> Any:
+    """依實際安裝版本的建構子簽章,實例化 fast-plate-ocr 的辨識器。
+
+    兩種模式:
+    1. Hub 模型:model_or_path 是 "global-plates-mobile-vit-v2-model" 這類名稱,
+       由 fast-plate-ocr 自行下載。
+    2. 自訓 ONNX:model_or_path 是 .onnx 的檔案路徑,搭配 plate_config.yaml。
+
+    參數名稱一律以 inspect.signature 讀到的為準,不猜。
+    """
+    target = _LicensePlateRecognizer
+    version = installed_version("fast-plate-ocr")
+    plan = _plan_load(target, model_or_path, config_path)
+
+    try:
+        instance = target(**plan.kwargs)
+    except Exception as exc:
+        raise OcrBackendUnavailable(
+            f"fast-plate-ocr {version} 的 {target.__name__} 以 "
+            f"{sorted(plan.kwargs)} 呼叫失敗:{type(exc).__name__}: {exc}"
+        ) from exc
+
+    _logger.info(
+        "fast-plate-ocr %s:%s 以 %s(%s)初始化成功",
+        version,
+        target.__name__,
+        plan.description,
+        ", ".join(f"{k}={v!r}" for k, v in plan.kwargs.items()),
     )
+    return instance
 
 
 def _preprocess_for_ocr(jpeg_bytes: bytes) -> bytes:
@@ -482,11 +620,13 @@ class PlateRecognizer:
 
 
 class NoopPlateRecognizer:
-    """Drop-in replacement when fast-plate-ocr is unavailable.
+    """只在 config 明確寫 ``ocr_backend: noop`` 時使用的假後端。
 
-    Used on PC dev environment where we don't want to install the OCR
-    dependency just to run unit tests, and as a fallback if the runtime
-    install on the Pi failed.
+    用途:PC 開發環境不想為了跑單元測試裝 OCR 相依,或現場只想驗偵測與
+    追蹤、不需要車牌。
+
+    這個類別**不再**被當成初始化失敗的退路 —— 那會讓整場實驗安靜地產出
+    一份沒有車牌的 CSV。失敗現在直接丟 :class:`OcrBackendUnavailable`。
     """
 
     @property
@@ -503,18 +643,20 @@ class NoopPlateRecognizer:
 def make_recognizer(config: StationConfig) -> Any:
     """Build the OCR backend chosen by the station YAML.
 
-    Falls back to NoopPlateRecognizer with a warning if the requested
-    backend's dependencies aren't installed — keeps the station running
-    even if a Pi is missing the optional OCR libraries, so vehicle
-    detection still works and operators can see "no OCR" in the events.
+    初始化失敗一律丟 :class:`OcrBackendUnavailable` 中止程式,**不會**退回
+    假後端。原本的作法是記一則 warning 就繼續跑,結果是整場現場實驗產出一份
+    完全沒有車牌的 CSV,而且要等實驗跑完才發現 —— 一次實驗的成本是一整個
+    上午。要在沒有 OCR 的情況下跑(例如只驗偵測與追蹤),請在 YAML 明確寫
+    ``ocr_backend: noop``。
     """
     backend = config.ocr_backend.lower()
 
     if backend == "noop":
-        _logger.info("OCR backend: noop (disabled by config)")
+        _logger.info("OCR backend: noop(config 明確關閉,不做車牌辨識)")
         return NoopPlateRecognizer()
 
     if backend == "fast-plate-ocr":
+        version = installed_version("fast-plate-ocr")
         try:
             return PlateRecognizer(
                 model_name=config.ocr_model_name,
@@ -523,25 +665,36 @@ def make_recognizer(config: StationConfig) -> Any:
                 preprocess=config.ocr_preprocess,
                 save_debug_crops=config.save_debug_crops,
             )
-        except RuntimeError as exc:
-            _logger.warning(
-                "fast-plate-ocr unavailable, falling back to noop: %s", exc
-            )
-            return NoopPlateRecognizer()
+        except Exception as exc:
+            raise OcrBackendUnavailable(
+                f"OCR 後端 'fast-plate-ocr' 初始化失敗,站台中止。\n"
+                f"  已安裝版本: fast-plate-ocr {version}\n"
+                f"  模型       : {config.ocr_model_name}\n"
+                f"  模型設定檔 : {config.ocr_model_config}\n"
+                f"  錯誤       : {type(exc).__name__}: {exc}\n"
+                f"若要在沒有車牌辨識的情況下跑,請在 YAML 明確設定 "
+                f"ocr_backend: noop"
+            ) from exc
 
     if backend == "paddleocr":
         # Lazy import — keeps PC dev / fast-plate-ocr-only deployments from
         # paying the cost of importing paddle at module load time.
+        version = installed_version("paddleocr")
         try:
             from speed_trap.paddle_recognizer import PaddleOCRRecognizer
 
             return PaddleOCRRecognizer(preprocess=config.ocr_preprocess)
-        except RuntimeError as exc:
-            _logger.warning(
-                "paddleocr unavailable, falling back to noop: %s", exc
-            )
-            return NoopPlateRecognizer()
+        except Exception as exc:
+            raise OcrBackendUnavailable(
+                f"OCR 後端 'paddleocr' 初始化失敗,站台中止。\n"
+                f"  已安裝版本: paddleocr {version}\n"
+                f"  錯誤       : {type(exc).__name__}: {exc}\n"
+                f"安裝方式 pip install -e \".[paddle]\";若要在沒有車牌辨識的"
+                f"情況下跑,請在 YAML 明確設定 ocr_backend: noop"
+            ) from exc
 
-    # Should be unreachable thanks to config validation, but be defensive
-    _logger.warning("unknown ocr_backend %r, using noop", backend)
-    return NoopPlateRecognizer()
+    # config 驗證應該已經擋掉,但萬一有人繞過驗證,同樣不默默降級。
+    raise OcrBackendUnavailable(
+        f"不認得的 ocr_backend {backend!r}。可用值:fast-plate-ocr、"
+        f"paddleocr、noop"
+    )

@@ -10,8 +10,17 @@ opencv-python-headless
 pyyaml
 
 # OCR 與車牌偵測(W3 三段式 cascade 的第二、三段,都跑在 Pi CPU 上)
-fast-plate-ocr
-ultralytics
+#
+# 版本上限只擋主版本跳版,不鎖死小版本 —— Pi 是 aarch64,可用的 wheel 跟開發
+# 機不同,鎖死會裝不起來。加上限的原因:在 Pi 上跑 pip install -e . 之後
+# fast-plate-ocr 自動升級,ONNXPlateRecognizer 改名為 LicensePlateRecognizer
+# 且建構子參數換掉,程式當場失去車牌辨識能力。
+#
+# plate_recognizer 現在會用 inspect.signature 讀出實際版本的建構子簽章來組裝
+# 呼叫,所以小版本改參數名還是能自動相容;上限是為了擋主版本的破壞性改動。
+# 站台啟動時會 log 出實際載入的版本與比對到的簽章,升級後請看那一行。
+fast-plate-ocr<2
+ultralytics<9
 
 # =====================================================================
 # 以下兩個「不要」用 pip 裝,pip 上沒有能用的版本:

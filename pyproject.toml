@@ -13,13 +13,17 @@ authors = [{ name = "Lin Shu-Hsien" }]
 # 必要依賴。要跟 requirements.txt 保持一致 —— pip install -e . 與
 # pip install -r requirements.txt 必須裝出相同的環境。
 # PyGObject(gi)與 hailo 不在此列:兩者走 apt,不走 pip,理由見 requirements.txt。
+# 上限只擋主版本跳版,不鎖死小版本 —— Pi 是 aarch64,可用的 wheel 跟開發機
+# 不同,鎖死會裝不起來。有上限是因為 fast-plate-ocr 曾經在一次 pip install -e .
+# 之後跳版,把 ONNXPlateRecognizer 改名成 LicensePlateRecognizer 且換掉建構子
+# 參數,程式當場失去車牌辨識能力。
 dependencies = [
     "paho-mqtt",
     "numpy",
     "opencv-python-headless",
     "pyyaml",
-    "fast-plate-ocr",
-    "ultralytics",
+    "fast-plate-ocr<2",
+    "ultralytics<9",
 ]
 
 [project.optional-dependencies]
