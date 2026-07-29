@@ -87,7 +87,9 @@ def test_prune_stale_removes_old_tracks() -> None:
 
     pruned = tracker.prune_stale(now_ns=6 * _NS_PER_SEC)
 
-    assert pruned == [1]
+    # prune_stale 回傳整條 VehicleTrack 而非 id:結算需要幀數、最佳幀、
+    # 邊界統計等資料,只給 id 的話呼叫端拿不到。
+    assert [track.track_id for track in pruned] == [1]
     assert tracker.get_track(1) is None
     assert tracker.get_track(2) is not None
 
@@ -144,4 +146,4 @@ def test_custom_stale_timeout() -> None:
     tracker.update([_det(1, (0.4, 0.4, 0.6, 0.6), frame_ns=0)])
 
     pruned = tracker.prune_stale(now_ns=2_000)
-    assert pruned == [1]
+    assert [track.track_id for track in pruned] == [1]
