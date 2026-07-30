@@ -23,6 +23,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from speed_trap.config import StationConfig
@@ -118,8 +119,11 @@ def _fmt_wh(wh: tuple[int, int] | None) -> str:
 
 
 def _is_path_like(s: str) -> bool:
-    """Heuristic: distinguish a fast-plate-ocr hub model name from a filesystem
-    path. Paths contain separators or end in .onnx; hub names do not."""
+    """判斷 config 的 ocr_model_name 是「檔案路徑」還是「hub 模型名稱」。
+
+    路徑含分隔符號或以 .onnx 結尾;hub 名稱(例如
+    "global-plates-mobile-vit-v2-model")兩者皆無。
+    """
     if not s:
         return False
     if "/" in s or "\\" in s:
@@ -142,14 +146,25 @@ _CONFIG_PATH_PARAMS = (
     "model_config_path",
     "plate_config",
 )
+_DEVICE_PARAMS = ("device",)
+
+# Pi 沒有 CUDA。留著預設的 'auto' 會在每次建立 recognizer 時印兩行 GPU 偵測
+# 失敗的警告,明確指定就不會去探。
+_DEVICE = "cpu"
 
 
 @dataclass(frozen=True)
-class _LoadPlan:
-    """依實際簽章決定要怎麼呼叫建構子。"""
+class BackendInfo:
+    """實際載入的 OCR 後端資訊。供 log 與 scripts/check_ocr.py 顯示。"""
 
+    class_name: str
+    version: str
+    mode: str                 # "自訂 ONNX" 或 "hub 模型"
     kwargs: dict[str, str]
-    description: str      # log 用,說明比對到哪一種簽章
+
+    def describe(self) -> str:
+        arguments = ", ".join(f"{k}={v!r}" for k, v in self.kwargs.items())
+        return f"{self.class_name}({arguments})"
 
 
 def _accepted_params(target: Any) -> dict[str, inspect.Parameter]:
@@ -173,66 +188,104 @@ def _first_accepted(
     return None
 
 
+def _is_required(param: inspect.Parameter) -> bool:
+    return param.default is inspect.Parameter.empty
+
+
+def _require_file(path: str, label: str) -> None:
+    """自己先檢查檔案在不在,才給得出「是哪個檔案不見了」。
+
+    fast-plate-ocr 內部是 ``if onnx_model_path and plate_config_path`` 兩個
+    一起檢查,不存在時只丟一句 "Missing model/config file!" —— 看不出是模型
+    還是設定檔,現場排查很浪費時間。
+    """
+    target = Path(path).expanduser()
+    if not target.exists():
+        raise OcrBackendUnavailable(
+            f"{label} 找不到:{target}\n"
+            f"(fast-plate-ocr 內部只會回報 'Missing model/config file!',"
+            f"分不出是哪一個檔案,所以這裡先自己檢查)"
+        )
+    if not target.is_file():
+        raise OcrBackendUnavailable(f"{label} 不是檔案:{target}")
+
+
 def _plan_load(
     target: Any, model_or_path: str, config_path: str | None
-) -> _LoadPlan:
-    """讀出實際簽章,決定要傳哪些參數。認不得就丟出說明清楚的錯誤。"""
+) -> BackendInfo:
+    """讀出實際簽章與設定值,決定要傳哪些參數。
+
+    自訂 ONNX 與 hub 模型是互斥的兩條路,絕不同時填:套件內部是
+    ``if onnx_model_path and plate_config_path: ... elif hub_ocr_model: ...``,
+    而且 hub_ocr_model 只接受預訓練清單裡的名稱 —— 把檔案路徑塞進去不會被
+    當成路徑,只會變成一個不存在的模型名稱。
+    """
     accepted = _accepted_params(target)
     available = ", ".join(accepted) or "(無具名參數)"
+    version = installed_version("fast-plate-ocr")
 
     if _is_path_like(model_or_path):
         onnx_param = _first_accepted(_ONNX_PATH_PARAMS, accepted)
         if onnx_param is None:
-            # 有些版本沒有專門的 onnx 參數,自訓模型是從 hub 參數傳路徑進去。
-            onnx_param = _first_accepted(_HUB_MODEL_PARAMS, accepted)
-            if onnx_param is None:
-                raise OcrBackendUnavailable(
-                    f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
-                    f"{target.__name__} 建構子沒有任何認得的模型路徑參數。"
-                    f"實際接受的參數:{available}。"
-                    f"預期其中之一:{_ONNX_PATH_PARAMS + _HUB_MODEL_PARAMS}"
-                )
-        kwargs = {onnx_param: model_or_path}
-        description = f"自訓 ONNX,{onnx_param}="
-
-        config_param = _first_accepted(_CONFIG_PATH_PARAMS, accepted)
-        if config_path:
-            if config_param is None:
-                raise OcrBackendUnavailable(
-                    f"config 指定了 ocr_model_config={config_path!r},但 "
-                    f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
-                    f"{target.__name__} 建構子沒有對應參數。"
-                    f"實際接受的參數:{available}"
-                )
-            kwargs[config_param] = config_path
-            description += f" + {config_param}="
-        elif config_param is not None and _is_required(accepted[config_param]):
             raise OcrBackendUnavailable(
-                f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
-                f"{target.__name__} 要求 {config_param},但 config 的 "
-                "ocr_model_config 是空的。自訓 ONNX 必須一併指定 "
-                "plate_config.yaml"
+                f"config 的 ocr_model_name 是檔案路徑({model_or_path}),但 "
+                f"fast-plate-ocr {version} 的 {target.__name__} 建構子沒有任何"
+                f"認得的 ONNX 路徑參數。實際接受的參數:{available}。"
+                f"預期其中之一:{_ONNX_PATH_PARAMS}"
+            )
+        config_param = _first_accepted(_CONFIG_PATH_PARAMS, accepted)
+        if config_param is None:
+            raise OcrBackendUnavailable(
+                f"自訂 ONNX 需要一併傳入 plate_config,但 fast-plate-ocr "
+                f"{version} 的 {target.__name__} 建構子沒有對應參數。"
+                f"實際接受的參數:{available}。預期其中之一:{_CONFIG_PATH_PARAMS}"
+            )
+        if not config_path:
+            raise OcrBackendUnavailable(
+                f"config 的 ocr_model_name 指向自訓 ONNX({model_or_path}),"
+                f"但 ocr_model_config 是空的。自訓模型必須一併指定訓練輸出的 "
+                f"plate_config.yaml"
+            )
+
+        # 兩個檔案都要存在,而且要能指出是哪一個不見了。
+        _require_file(model_or_path, "ONNX 模型(ocr_model_name)")
+        _require_file(config_path, "模型設定檔(ocr_model_config)")
+
+        kwargs = {onnx_param: model_or_path, config_param: config_path}
+        mode = "自訂 ONNX"
+
+        # 這條路上 hub 參數一定留 None(不填即為預設)。若它竟是必填,
+        # 表示這個版本不支援純自訂 ONNX,寧可講清楚也不要硬塞路徑進去。
+        hub_param = _first_accepted(_HUB_MODEL_PARAMS, accepted)
+        if hub_param is not None and _is_required(accepted[hub_param]):
+            raise OcrBackendUnavailable(
+                f"fast-plate-ocr {version} 的 {target.__name__} 把 {hub_param} "
+                f"列為必填,無法只用自訂 ONNX 初始化。{hub_param} 只接受預訓練"
+                f"模型名稱,填入檔案路徑不會被當成路徑。請改用支援 "
+                f"{onnx_param} 的版本(pip install 'fast-plate-ocr<2')"
             )
     else:
         hub_param = _first_accepted(_HUB_MODEL_PARAMS, accepted)
         if hub_param is None:
             raise OcrBackendUnavailable(
-                f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
-                f"{target.__name__} 建構子沒有任何認得的 hub 模型參數。"
-                f"實際接受的參數:{available}。"
+                f"fast-plate-ocr {version} 的 {target.__name__} 建構子沒有任何"
+                f"認得的 hub 模型參數。實際接受的參數:{available}。"
                 f"預期其中之一:{_HUB_MODEL_PARAMS}"
             )
         kwargs = {hub_param: model_or_path}
-        description = f"hub 模型,{hub_param}="
+        mode = "hub 模型"
+        if config_path:
+            _logger.warning(
+                "ocr_model_name=%r 是 hub 模型名稱,ocr_model_config=%r 會被忽略"
+                "(plate_config 只用於自訂 ONNX)",
+                model_or_path,
+                config_path,
+            )
 
-    # 有些版本即使走自訂 ONNX 的路,模型名稱那個參數仍然是必填(舊的
-    # ONNXPlateRecognizer 就是這樣)。這種情況把同一個識別字串一併補上,
-    # 不要因為填不滿就放棄 —— 真的不合法的話,建構子自己會報錯,那時的
-    # 訊息比我們猜的準。
-    for name in _HUB_MODEL_PARAMS:
-        if name in accepted and name not in kwargs and _is_required(accepted[name]):
-            kwargs[name] = model_or_path
-            description += f" + {name}="
+    # Pi 上一律 CPU,免得每次初始化都印 GPU 偵測失敗的警告。
+    device_param = _first_accepted(_DEVICE_PARAMS, accepted)
+    if device_param is not None:
+        kwargs[device_param] = _DEVICE
 
     missing = [
         name
@@ -241,48 +294,47 @@ def _plan_load(
     ]
     if missing:
         raise OcrBackendUnavailable(
-            f"fast-plate-ocr {installed_version('fast-plate-ocr')} 的 "
-            f"{target.__name__} 還有我們填不了的必填參數:{missing}。"
-            f"實際接受的參數:{available}"
+            f"fast-plate-ocr {version} 的 {target.__name__} 還有我們填不了的"
+            f"必填參數:{missing}。實際接受的參數:{available}"
         )
 
-    return _LoadPlan(kwargs=kwargs, description=description)
+    return BackendInfo(
+        class_name=target.__name__, version=version, mode=mode, kwargs=kwargs
+    )
 
 
-def _is_required(param: inspect.Parameter) -> bool:
-    return param.default is inspect.Parameter.empty
-
-
-def _load_lpr(model_or_path: str, config_path: str | None) -> Any:
+def _load_lpr(
+    model_or_path: str, config_path: str | None
+) -> tuple[Any, BackendInfo]:
     """依實際安裝版本的建構子簽章,實例化 fast-plate-ocr 的辨識器。
 
-    兩種模式:
-    1. Hub 模型:model_or_path 是 "global-plates-mobile-vit-v2-model" 這類名稱,
+    兩種互斥的模式,由 ocr_model_name 的**內容**決定,不是由參數名稱決定:
+    1. 自訂 ONNX:值是 .onnx 檔案路徑,搭配 ocr_model_config 的
+       plate_config.yaml。兩個檔案都必須存在。
+    2. Hub 模型:值是 "global-plates-mobile-vit-v2-model" 這類預訓練名稱,
        由 fast-plate-ocr 自行下載。
-    2. 自訓 ONNX:model_or_path 是 .onnx 的檔案路徑,搭配 plate_config.yaml。
 
     參數名稱一律以 inspect.signature 讀到的為準,不猜。
     """
     target = _LicensePlateRecognizer
-    version = installed_version("fast-plate-ocr")
-    plan = _plan_load(target, model_or_path, config_path)
+    info = _plan_load(target, model_or_path, config_path)
 
     try:
-        instance = target(**plan.kwargs)
+        instance = target(**info.kwargs)
     except Exception as exc:
         raise OcrBackendUnavailable(
-            f"fast-plate-ocr {version} 的 {target.__name__} 以 "
-            f"{sorted(plan.kwargs)} 呼叫失敗:{type(exc).__name__}: {exc}"
+            f"fast-plate-ocr {info.version} 的 {info.describe()} 呼叫失敗:"
+            f"{type(exc).__name__}: {exc}"
         ) from exc
 
     _logger.info(
-        "fast-plate-ocr %s:%s 以 %s(%s)初始化成功",
-        version,
-        target.__name__,
-        plan.description,
-        ", ".join(f"{k}={v!r}" for k, v in plan.kwargs.items()),
+        "fast-plate-ocr %s:%s(%s)以 %s 初始化成功",
+        info.version,
+        info.class_name,
+        info.mode,
+        info.describe(),
     )
-    return instance
+    return instance, info
 
 
 def _preprocess_for_ocr(jpeg_bytes: bytes) -> bytes:
@@ -397,7 +449,7 @@ class PlateRecognizer:
             )
         # _load_lpr decides between hub-name and custom-ONNX-path automatically.
         # For hub models this triggers a ~10MB download to ~/.cache/ on first use.
-        self._lpr = _load_lpr(model_name, model_config)
+        self._lpr, self._backend_info = _load_lpr(model_name, model_config)
         self._model_name = model_name
         self._model_config = model_config
         self._preprocess = preprocess
@@ -432,8 +484,42 @@ class PlateRecognizer:
         return self._model_name
 
     @property
+    def backend_info(self) -> BackendInfo:
+        """實際載入的類別、版本與參數組合。scripts/check_ocr.py 會印出來。"""
+        return self._backend_info
+
+    @property
     def has_plate_detector(self) -> bool:
         return self._plate_detector is not None
+
+    def read_plate_only(self, jpeg_bytes: bytes) -> OcrAttempt:
+        """跳過車牌偵測那一段,把輸入直接餵給 OCR。
+
+        給 scripts/check_ocr.py 用:既有的除錯圖有兩種,
+        ``*_vehicle.jpg`` 是整輛車、``*_plate.jpg`` 已經是切好的車牌。
+        後者再送一次車牌偵測往往找不到東西,那是輸入型態的問題,不是 OCR
+        讀不出來。
+        """
+        if not jpeg_bytes:
+            return OcrAttempt(reading=None, failure="empty_input")
+        payload = jpeg_bytes
+        if self._preprocess:
+            payload = _preprocess_for_ocr(payload)
+        size = _jpeg_dimensions(jpeg_bytes)
+        fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_plate_")
+        try:
+            os.write(fd, payload)
+            os.close(fd)
+            reading = self._read_path(tmp_path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+        return OcrAttempt(
+            reading=reading,
+            vehicle_wh=size,
+            plate_wh=size,
+            failure=None if reading else "ocr_empty",
+        )
 
     def read_from_jpeg(self, jpeg_bytes: bytes) -> PlateReading | None:
         return self.read_attempt(jpeg_bytes).reading
