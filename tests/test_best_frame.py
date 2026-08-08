@@ -131,6 +131,68 @@ def test_sharpness_weight_zero_ignores_sharpness() -> None:
     assert score_detection(blurry, params) == score_detection(sharp, params)
 
 
+def test_new_weights_never_pick_a_frame_further_from_the_camera() -> None:
+    """調權重的目的是「選更近的車」,而且不能有反效果。
+
+    實測選中的幀落在 track 的 51-60% 處,車還沒開到最近就結算了。把面積權重
+    從 0.6 拉到 0.85、置中從 0.3 壓到 0.05 之後,在各種軌跡下選中的 bbox 只能
+    變寬或不變 —— 車牌像素數直接決定辨識正確率,選到更遠的車就是退步。
+
+    邊界排除不受影響:它是硬性條件,不參與加權。
+    """
+    import itertools
+
+    previous = ScoringParams(
+        area_weight=0.6,
+        center_weight=0.3,
+        sharpness_weight=0.1,
+        sharpness_reference=500.0,
+    )
+    current = ScoringParams()
+
+    def chosen_width(params: ScoringParams, detections: list) -> float:  # type: ignore[type-arg]
+        tracker = VehicleTracker(scoring=params)
+        for detection in detections:
+            tracker.update([detection])
+        best = tracker.get_track(1).best_frame()  # type: ignore[union-attr]
+        assert best is not None
+        x1, _y1, x2, _y2 = best.detection.bbox
+        return x2 - x1
+
+    def trajectory(
+        cy_end: float, half_end: float, sharp_start: float, sharp_end: float
+    ) -> list:  # type: ignore[type-arg]
+        out = []
+        for index in range(30):
+            progress = index / 29
+            half = 0.05 + (half_end - 0.05) * progress
+            center_y = 0.30 + (cy_end - 0.30) * progress
+            out.append(
+                make_detection(
+                    1,
+                    (0.5 - half, center_y - half, 0.5 + half, center_y + half),
+                    index * NS_PER_SEC // 30,
+                    sharpness=sharp_start + (sharp_end - sharp_start) * progress,
+                )
+            )
+        return out
+
+    compared = 0
+    for cy_end, half_end, sharp_start, sharp_end in itertools.product(
+        (0.55, 0.70, 0.85, 0.95), (0.20, 0.30, 0.40), (300.0, 1100.0), (120.0, 1100.0)
+    ):
+        detections = trajectory(cy_end, half_end, sharp_start, sharp_end)
+        before = chosen_width(previous, detections)
+        after = chosen_width(current, detections)
+        assert after >= before - 1e-9, (
+            f"cy_end={cy_end} half_end={half_end} "
+            f"sharpness={sharp_start}->{sharp_end}:選到更遠的車 "
+            f"({before:.3f} -> {after:.3f})"
+        )
+        compared += 1
+    assert compared == 48
+
+
 def test_scoring_params_come_from_config() -> None:
     from tests.helpers import make_config
 

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from speed_trap import preprocess
 from speed_trap.config import StationConfig
 from speed_trap.log_throttle import ThrottledWarning
 from speed_trap.plate_format import is_valid_taiwan_plate, normalize_plate
@@ -337,47 +338,6 @@ def _load_lpr(
     return instance, info
 
 
-def _preprocess_for_ocr(jpeg_bytes: bytes) -> bytes:
-    """Apply CLAHE (adaptive histogram equalization) + sharpening before OCR.
-
-    Phase A experiment: many "OCR misreads" come from low-contrast or slightly
-    blurry plate crops. CLAHE recovers contrast in shadowed plates; a small
-    unsharp-mask helps the OCR see character edges more clearly.
-
-    Returns a new JPEG with the same shape. If decoding fails (corrupt input),
-    we return the original bytes unchanged so the caller can still attempt OCR.
-    """
-    if _IMPORT_ERROR is not None or not jpeg_bytes:
-        return jpeg_bytes
-    try:
-        nparr = _np.frombuffer(jpeg_bytes, _np.uint8)
-        img_bgr = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
-        if img_bgr is None:
-            return jpeg_bytes
-
-        # CLAHE on the luminance channel only (preserves colour distribution)
-        lab = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2LAB)
-        l_channel, a, b = _cv2.split(lab)
-        clahe = _cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l_clahe = clahe.apply(l_channel)
-        lab_eq = _cv2.merge((l_clahe, a, b))
-        img_eq = _cv2.cvtColor(lab_eq, _cv2.COLOR_LAB2BGR)
-
-        # Light unsharp mask
-        blur = _cv2.GaussianBlur(img_eq, (0, 0), sigmaX=1.0)
-        img_sharp = _cv2.addWeighted(img_eq, 1.4, blur, -0.4, 0)
-
-        ok, jpeg = _cv2.imencode(
-            ".jpg", img_sharp, [int(_cv2.IMWRITE_JPEG_QUALITY), 95]
-        )
-        if ok:
-            return bytes(jpeg)
-        return jpeg_bytes
-    except Exception as exc:  # pragma: no cover - opencv glitches
-        _logger.warning("preprocessing failed: %s", exc)
-        return jpeg_bytes
-
-
 @dataclass(frozen=True)
 class PlateReading:
     text: str           # canonicalised, uppercase, no spaces/hyphens
@@ -438,7 +398,7 @@ class PlateRecognizer:
         *,
         model_config: str | None = None,
         plate_detector_path: str | None = None,
-        preprocess: bool = False,
+        preprocess_strategy: str = preprocess.DEFAULT,
         save_debug_crops: bool = False,
         debug_dir: str | None = None,
     ) -> None:
@@ -447,12 +407,13 @@ class PlateRecognizer:
                 "PlateRecognizer dependencies missing: "
                 f"{_IMPORT_ERROR}. Install with: pip install fast-plate-ocr opencv-python-headless"
             )
+        # 認不得的策略名稱在建構時就炸,不要跑到第一台車才發現。
+        self._preprocess = preprocess.resolve(preprocess_strategy)
         # _load_lpr decides between hub-name and custom-ONNX-path automatically.
         # For hub models this triggers a ~10MB download to ~/.cache/ on first use.
         self._lpr, self._backend_info = _load_lpr(model_name, model_config)
         self._model_name = model_name
         self._model_config = model_config
-        self._preprocess = preprocess
         self._save_debug_crops = save_debug_crops
         self._debug_dir = debug_dir or DEFAULT_DEBUG_DIR
         self._debug_seq = 0
@@ -474,7 +435,7 @@ class PlateRecognizer:
             model_name,
             model_config,
             plate_detector_path or "(none — direct OCR)",
-            preprocess,
+            self._preprocess,
             save_debug_crops,
             self._debug_dir,
         )
@@ -482,6 +443,11 @@ class PlateRecognizer:
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def preprocess_strategy(self) -> str:
+        """實際套用的前處理策略名稱(已對過別名)。"""
+        return self._preprocess
 
     @property
     def backend_info(self) -> BackendInfo:
@@ -502,9 +468,7 @@ class PlateRecognizer:
         """
         if not jpeg_bytes:
             return OcrAttempt(reading=None, failure="empty_input")
-        payload = jpeg_bytes
-        if self._preprocess:
-            payload = _preprocess_for_ocr(payload)
+        payload = preprocess.apply_to_jpeg(self._preprocess, jpeg_bytes)
         size = _jpeg_dimensions(jpeg_bytes)
         fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_plate_")
         try:
@@ -568,9 +532,10 @@ class PlateRecognizer:
         else:
             payload = jpeg_bytes
 
-        # Optional contrast / sharpen preprocessing
-        if self._preprocess:
-            payload = _preprocess_for_ocr(payload)
+        # 前處理接在車牌偵測之後、OCR 之前 —— 離線掃描量的就是這個位置
+        # (對已經切好的車牌圖做前處理再送 OCR),換了位置掃描的結論就不適用。
+        if self._preprocess != preprocess.BASELINE:
+            payload = preprocess.apply_to_jpeg(self._preprocess, payload)
             self._maybe_save_debug("preproc", payload)
 
         # The two numbers that say whether the crop path is healthy: how big
@@ -625,33 +590,12 @@ class PlateRecognizer:
 
         return self._results_to_reading(results)
 
-    def _read_array(self, image: Any) -> PlateReading | None:
-        """Run OCR on a pre-decoded ndarray. Caller is responsible for the
-        shape/format matching the loaded model. Use ``read_from_jpeg`` if
-        you don't want to think about that."""
-        try:
-            # 取得圖片的 高 (h) 與 寬 (w)
-            h, w = image.shape[:2]
-
-            # 🌟 優化 1：面積守門員 (直接丟棄太小的背景雜訊)
-            if w < 40 or h < 15:
-                return None
-
-            # --- 轉為灰階 ---
-            if len(image.shape) == 3:
-                image = _cv2.cvtColor(image, _cv2.COLOR_BGR2GRAY)
-
-            # 🌟 優化 2：畫質無損放大 (解決 OCR 鋸齒誤判，遵循手冊建議)
-            if w < 96 or h < 24:
-                new_w = max(w * 2, 96)
-                new_h = max(h * 2, 24)
-                image = _cv2.resize(image, (new_w, new_h), interpolation=_cv2.INTER_CUBIC)
-
-            results = self._lpr.run(image)
-        except Exception as exc:
-            _logger.warning("fast-plate-ocr failed: %s", exc)
-            return None
-        return self._results_to_reading(results)
+    # 這裡原本還有一個 _read_array:接 ndarray、小於 40x15 就放棄、小於 96x24
+    # 就用 CUBIC 放大。它從來沒被呼叫過(read_from_jpeg 走的是 _read_path)。
+    # 那段 CUBIC 放大現在真的接上線了 —— 它就是 speed_trap.preprocess 的
+    # cubic_* 系列,而且離線掃描證明配上 unsharp 之後有效(23/46 → 26/46)。
+    # 最小尺寸的門檻沒有跟著接回來:讀不出來的小圖也要留一行 CSV 才查得到
+    # 原因,而 plate_box_w 欄位本來就讓事後篩選做得到同一件事。
 
     @staticmethod
     def _results_to_reading(results: Any) -> PlateReading | None:
@@ -748,7 +692,7 @@ def make_recognizer(config: StationConfig) -> Any:
                 model_name=config.ocr_model_name,
                 model_config=config.ocr_model_config,
                 plate_detector_path=config.ocr_plate_detector_path,
-                preprocess=config.ocr_preprocess,
+                preprocess_strategy=config.ocr_preprocess,
                 save_debug_crops=config.save_debug_crops,
             )
         except Exception as exc:
@@ -769,7 +713,7 @@ def make_recognizer(config: StationConfig) -> Any:
         try:
             from speed_trap.paddle_recognizer import PaddleOCRRecognizer
 
-            return PaddleOCRRecognizer(preprocess=config.ocr_preprocess)
+            return PaddleOCRRecognizer(preprocess_strategy=config.ocr_preprocess)
         except Exception as exc:
             raise OcrBackendUnavailable(
                 f"OCR 後端 'paddleocr' 初始化失敗,站台中止。\n"

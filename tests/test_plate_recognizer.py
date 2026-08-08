@@ -162,7 +162,7 @@ def _config(
     ocr_model_name: str = "global-plates-mobile-vit-v2-model",
     ocr_model_config: str | None = None,
     ocr_plate_detector_path: str | None = None,
-    ocr_preprocess: bool = False,
+    ocr_preprocess: str = "none",
     save_debug_crops: bool = False,
 ) -> StationConfig:
     return StationConfig(
@@ -226,21 +226,10 @@ def test_make_recognizer_unknown_backend_raises() -> None:
     fake_config = SimpleNamespace(
         ocr_backend="surprise",
         ocr_model_name="x",
-        ocr_preprocess=False,
+        ocr_preprocess="none",
     )
     with pytest.raises(pr.OcrBackendUnavailable):
         pr.make_recognizer(fake_config)  # type: ignore[arg-type]
-
-
-def test_preprocess_helper_handles_empty_bytes() -> None:
-    """Phase A preprocessing should be a no-op for empty input."""
-    assert pr._preprocess_for_ocr(b"") == b""
-
-
-def test_preprocess_helper_handles_invalid_jpeg() -> None:
-    """Corrupt input should be returned unchanged, not crash."""
-    out = pr._preprocess_for_ocr(b"not a real jpeg")
-    assert out == b"not a real jpeg"
 
 
 # ─── _is_path_like — path vs hub-name detection (Phase B custom ONNX) ──

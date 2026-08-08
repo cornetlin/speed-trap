@@ -50,12 +50,17 @@ class Detection:
 
 @dataclass(frozen=True)
 class ScoringParams:
-    """最佳幀挑選的參數。預設值等同改版前的行為,實際值由 config 提供。"""
+    """最佳幀挑選的參數。這裡的預設值要與 StationConfig 一致,實際值由 config 提供。
 
-    area_weight: float = 0.6
-    center_weight: float = 0.3
+    面積權重高、置中權重低是刻意的:邊界排除已經把出框的幀擋在候選之外,
+    剩下的候選裡面積最大就等於車最近、車牌像素最多,而車牌像素數直接決定
+    辨識正確率。理由與實測數字見 StationConfig 的註解。
+    """
+
+    area_weight: float = 0.85
+    center_weight: float = 0.05
     sharpness_weight: float = 0.1
-    sharpness_reference: float = 500.0
+    sharpness_reference: float = 900.0
     edge_margin: float = 0.02
 
     @classmethod

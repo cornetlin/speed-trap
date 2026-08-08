@@ -21,8 +21,9 @@ import os
 import tempfile
 from typing import Any
 
+from speed_trap import preprocess
 from speed_trap.plate_format import is_valid_taiwan_plate, normalize_plate
-from speed_trap.plate_recognizer import PlateReading, _preprocess_for_ocr
+from speed_trap.plate_recognizer import PlateReading
 
 _logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class PaddleOCRRecognizer:
         self,
         lang: str = "en",
         *,
-        preprocess: bool = False,
+        preprocess_strategy: str = preprocess.DEFAULT,
         use_gpu: bool = False,
     ) -> None:
         if _IMPORT_ERROR is not None:
@@ -54,14 +55,14 @@ class PaddleOCRRecognizer:
                 f"{_IMPORT_ERROR}. Install with: "
                 "pip install paddleocr paddlepaddle"
             )
+        self._preprocess = preprocess.resolve(preprocess_strategy)
         # First instantiation downloads ~150-500MB models to ~/.paddleocr/
         # use_angle_cls=True helps with slightly rotated plates
         self._ocr = _PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=use_gpu)
         self._lang = lang
-        self._preprocess = preprocess
         _logger.info(
             "PaddleOCRRecognizer initialised with lang=%s use_gpu=%s preprocess=%s",
-            lang, use_gpu, preprocess,
+            lang, use_gpu, self._preprocess,
         )
 
     @property
@@ -72,7 +73,7 @@ class PaddleOCRRecognizer:
         if not jpeg_bytes:
             return None
 
-        payload = _preprocess_for_ocr(jpeg_bytes) if self._preprocess else jpeg_bytes
+        payload = preprocess.apply_to_jpeg(self._preprocess, jpeg_bytes)
 
         fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="speedtrap_paddle_")
         try:

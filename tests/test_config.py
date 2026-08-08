@@ -209,7 +209,8 @@ def test_ocr_fields_default_to_fast_plate_ocr(tmp_path: Path) -> None:
     cfg = load_config(yaml_path)
     assert cfg.ocr_backend == "fast-plate-ocr"
     assert cfg.ocr_model_name == "global-plates-mobile-vit-v2-model"
-    assert cfg.ocr_preprocess is False
+    # 沒寫 ocr_preprocess 就用實測最佳的策略,不是「不做前處理」
+    assert cfg.ocr_preprocess == "unsharp_cubic_3x"
 
 
 def test_load_config_ocr_fields_set(tmp_path: Path) -> None:
@@ -228,13 +229,104 @@ def test_load_config_ocr_fields_set(tmp_path: Path) -> None:
         mqtt_topic: t
         ocr_backend: paddleocr
         ocr_model_name: european-plates-mobile-vit-v2-model
-        ocr_preprocess: true
+        ocr_preprocess: cubic_3x
         """,
     )
     cfg = load_config(yaml_path)
     assert cfg.ocr_backend == "paddleocr"
     assert cfg.ocr_model_name == "european-plates-mobile-vit-v2-model"
-    assert cfg.ocr_preprocess is True
+    assert cfg.ocr_preprocess == "cubic_3x"
+
+
+# ─── ocr_preprocess:具名策略 + 舊 bool 格式 ──────────────────────────
+
+
+def _minimal_yaml(tmp_path: Path, extra: str) -> Path:
+    return _write_yaml(
+        tmp_path,
+        f"""
+        station_id: x
+        camera_source: cam
+        frame_width: 640
+        frame_height: 480
+        frame_fps: 30
+        hef_path: m.hef
+        hailofilter_so_path: /tmp/dummy.so
+        vehicle_classes: [car]
+        trigger_line_y: 0.5
+        mqtt_topic: t
+        {extra}
+        """,
+    )
+
+
+def test_ocr_preprocess_accepts_none_alias(tmp_path: Path) -> None:
+    cfg = load_config(_minimal_yaml(tmp_path, "ocr_preprocess: none"))
+    assert cfg.ocr_preprocess == "none"
+    # 別名要能對回正式名稱,線上才知道實際跑的是哪一支
+    from speed_trap import preprocess
+
+    assert preprocess.resolve(cfg.ocr_preprocess) == preprocess.BASELINE
+
+
+def test_ocr_preprocess_rejects_unknown_strategy(tmp_path: Path) -> None:
+    """拼錯字要當場炸開 —— 現場一次實驗要等一個上午的車流。"""
+    with pytest.raises(ValueError, match="認不得的前處理策略"):
+        load_config(_minimal_yaml(tmp_path, "ocr_preprocess: unsharpen_3x"))
+
+
+def test_legacy_bool_true_maps_to_default_not_clahe(tmp_path: Path) -> None:
+    """舊的 true 是 CLAHE+unsharp,實測有害 —— 不照原意還原。"""
+    cfg = load_config(_minimal_yaml(tmp_path, "ocr_preprocess: true"))
+    assert cfg.ocr_preprocess == "unsharp_cubic_3x"
+
+
+def test_legacy_bool_false_maps_to_baseline(tmp_path: Path) -> None:
+    from speed_trap import preprocess
+
+    cfg = load_config(_minimal_yaml(tmp_path, "ocr_preprocess: false"))
+    assert cfg.ocr_preprocess == preprocess.BASELINE
+
+
+def test_legacy_bool_warns_to_update_the_yaml(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        load_config(_minimal_yaml(tmp_path, "ocr_preprocess: true"))
+    assert any("ocr_preprocess" in record.message for record in caplog.records)
+
+
+# ─── raw_ring_size ─────────────────────────────────────────────────────
+
+
+def test_raw_ring_size_defaults_to_20(tmp_path: Path) -> None:
+    """2304x1296 下 20 張約 171 MiB —— 跟改解析度前的 30 張 1080p 差不多。"""
+    cfg = load_config(_minimal_yaml(tmp_path, "mqtt_broker: null"))
+    assert cfg.raw_ring_size == 20
+
+
+def test_raw_ring_size_from_yaml(tmp_path: Path) -> None:
+    cfg = load_config(_minimal_yaml(tmp_path, "raw_ring_size: 30"))
+    assert cfg.raw_ring_size == 30
+
+
+def test_raw_ring_size_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="raw_ring_size"):
+        load_config(_minimal_yaml(tmp_path, "raw_ring_size: 0"))
+
+
+# ─── 最佳幀評分的預設值 ────────────────────────────────────────────────
+
+
+def test_scoring_defaults_favour_the_nearest_car(tmp_path: Path) -> None:
+    """邊界排除已經擋掉出框的幀,所以面積權重可以放大 —— 面積大 = 車牌像素多。"""
+    cfg = load_config(_minimal_yaml(tmp_path, "mqtt_broker: null"))
+    assert cfg.score_area_weight == 0.85
+    assert cfg.score_center_weight == 0.05
+    assert cfg.score_sharpness_weight == 0.1
+    assert cfg.sharpness_reference == 900.0
 
 
 def test_invalid_ocr_backend_rejected() -> None:

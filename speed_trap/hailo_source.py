@@ -95,11 +95,17 @@ _QUEUE_MAX = 512
 # 要 A/B 實測時改這一個字串即可,其餘不用動。
 _CAMERA_FORMAT = "RGB"
 
-# How many full-resolution frames to keep around. The detection branch runs
-# behind the raw branch by however long hailonet + hailofilter + hailotracker
-# take, so the ring only has to cover that lag. 30 frames at 30 fps is a full
-# second of slack; at 1920x1080 RGB that is ~180 MB resident.
-_RAW_RING_SIZE = 30
+# 環形緩衝要保留幾張全解析度畫面。偵測線比取圖線落後 hailonet + hailofilter
+# + hailotracker 的處理時間,緩衝只要蓋得住這段落差,不必更多。
+#
+# 20 張在 30 fps 下是 0.67 秒,遠大於實測落差(健康行 log 的
+# `ring N hit / M fallback` 就是在監看這件事:fallback 一多就是不夠)。
+#
+# 為什麼從 30 降到 20:相機改成 IMX708 原生的 2304x1296 之後,一張 RGB 畫面
+# 是 2304×1296×3 ≈ 8.5 MiB,30 張要 256 MiB。降到 20 張是 171 MiB,跟改解析度
+# 之前(30 張 1080p,178 MiB)幾乎一樣 —— 等於用同樣的記憶體換到多 44% 的
+# 車牌像素。實際值由 config 的 raw_ring_size 決定,這裡只是預設。
+_RAW_RING_SIZE = 20
 
 # Crop margin around the vehicle bbox, in normalised units, so a plate sitting
 # right on the bumper edge isn't sliced off.
@@ -299,7 +305,7 @@ class HailoDetectionSource:
         config: StationConfig,
         *,
         queue_max: int = _QUEUE_MAX,
-        raw_ring_size: int = _RAW_RING_SIZE,
+        raw_ring_size: int | None = None,
         stats_interval_s: float = _STATS_INTERVAL_S,
     ) -> None:
         if _IMPORT_ERROR is not None:
@@ -320,7 +326,21 @@ class HailoDetectionSource:
         self._dropped = 0
 
         # --- full-resolution frame ring, keyed by buffer PTS ---------------
-        self._ring_size = max(1, int(raw_ring_size))
+        # 沒明講就用 config 的值(現場調參數不用改程式);測試才會傳明確的數字。
+        self._ring_size = max(
+            1, int(config.raw_ring_size if raw_ring_size is None else raw_ring_size)
+        )
+        ring_mib = (
+            self._ring_size * config.frame_width * config.frame_height * 3 / 1024 / 1024
+        )
+        _logger.info(
+            "原始解析度環形緩衝:%d 張 %dx%d RGB,約 %.0f MiB(%.2f 秒的緩衝)",
+            self._ring_size,
+            config.frame_width,
+            config.frame_height,
+            ring_mib,
+            self._ring_size / max(1, config.frame_fps),
+        )
         self._raw_frames: "OrderedDict[int, Any]" = OrderedDict()
         self._raw_lock = threading.Lock()
         self._raw_size: tuple[int, int] | None = None      # negotiated (w, h)

@@ -13,14 +13,24 @@ from pathlib import Path
 import pytest
 
 from scripts.ocr_sweep import (
+    FIX_ALREADY_VALID,
+    FIX_AMBIGUOUS,
+    FIX_CORRECTED,
+    FIX_EMPTY,
+    FIX_NO_CANDIDATE,
+    FMTFIX_SUFFIX,
     Attempt,
     character_accuracy,
+    derive_format_fix_attempts,
+    format_constrained_fix,
     levenshtein,
     load_truth,
     summarise,
+    summarise_format_fix,
     width_bucket,
     write_by_width,
     write_detail,
+    write_format_fix,
     write_summary,
 )
 
@@ -258,10 +268,12 @@ def test_csv_outputs_are_written(tmp_path: Path) -> None:
     assert {row["width_bucket"] for row in width_rows} == {"<40px"}
 
 
-def test_preprocessor_registry_has_the_expected_variants() -> None:
-    """加新前處理只要往字典加一筆 —— 這裡固定住既有的名稱。"""
+def test_preprocessor_registry_is_the_one_production_uses() -> None:
+    """掃描量的必須就是線上跑的那一份,否則結論套上去不成立。"""
     from scripts.ocr_sweep import PREPROCESSORS
+    from speed_trap import preprocess
 
+    assert PREPROCESSORS is preprocess.PREPROCESSORS
     assert "baseline" in PREPROCESSORS
     for name in (
         "cubic_2x",
@@ -275,3 +287,159 @@ def test_preprocessor_registry_has_the_expected_variants() -> None:
     ):
         assert name in PREPROCESSORS, name
     assert all(callable(fn) for fn in PREPROCESSORS.values())
+
+
+# --- 台灣車牌格式約束校正 ------------------------------------------------
+
+
+def test_observed_pairs_cannot_change_validity() -> None:
+    """現場核對出來的十對混淆字元,全部落在同一個字元類別。
+
+    這代表單靠它們做替換,格式驗證的結果必然不變 —— 一個字都救不回來。
+    這正是那 10 筆「位數全對、只錯一個字」的處境:形狀本來就對,字串已經
+    通過格式驗證,格式約束沒有任何資訊可用。
+
+    這個測試是要把這件事釘在程式碼裡,不是描述一個 bug。
+    """
+    from scripts.ocr_sweep import _OBSERVED_PAIRS
+
+    for left, right in _OBSERVED_PAIRS:
+        assert left.isdigit() == right.isdigit(), (left, right)
+
+
+def test_cross_class_pairs_do_change_shape() -> None:
+    """跨類別的那一組才是格式約束派得上用場的地方。"""
+    from scripts.ocr_sweep import _CROSS_CLASS_PAIRS
+
+    for left, right in _CROSS_CLASS_PAIRS:
+        assert left.isdigit() != right.isdigit(), (left, right)
+
+
+def test_valid_plate_is_left_alone() -> None:
+    fix = format_constrained_fix("ABC1234")
+    assert fix.action == FIX_ALREADY_VALID
+    assert fix.text == "ABC1234"
+
+
+def test_single_candidate_is_adopted() -> None:
+    """A8C1234 只有把 8 換成 B 才合法 —— 恰好一個候選,採用。"""
+    fix = format_constrained_fix("A8C1234")
+    assert fix.action == FIX_CORRECTED
+    assert fix.text == "ABC1234"
+    assert fix.candidates == ("ABC1234",)
+
+
+def test_two_candidates_leave_the_original_alone() -> None:
+    """A0C1234 的 0 換成 D 或 Q 都合法 —— 選哪個都是猜,一律不動。"""
+    fix = format_constrained_fix("A0C1234")
+    assert fix.action == FIX_AMBIGUOUS
+    assert fix.text == "A0C1234"
+    assert fix.candidates == ("ADC1234", "AQC1234")
+
+
+def test_no_candidate_leaves_the_original_alone() -> None:
+    """長度不對時換一個字救不了 —— 替換不會改變長度。"""
+    fix = format_constrained_fix("ABC12345")
+    assert fix.action == FIX_NO_CANDIDATE
+    assert fix.text == "ABC12345"
+
+
+def test_empty_read_is_not_invented_into_a_plate() -> None:
+    fix = format_constrained_fix("")
+    assert fix.action == FIX_EMPTY
+    assert fix.text == ""
+
+
+def test_illegal_letter_o_is_corrected_back_to_zero() -> None:
+    """台灣車牌沒有 O,所以 OCR 讀出 O 一定是錯的 —— 換回 0 才可能合法。"""
+    fix = format_constrained_fix("ABC1O34")
+    assert fix.action == FIX_CORRECTED
+    assert fix.text == "ABC1034"
+
+
+# --- fmtfix 變體的彙整 ---------------------------------------------------
+
+
+def test_derive_adds_one_fmtfix_row_per_attempt_without_rerunning_ocr() -> None:
+    attempts = [
+        _attempt("a.jpg", "baseline", "A8C1234", "ABC1234"),
+        _attempt("b.jpg", "baseline", "XYZ5678", "XYZ5678"),
+    ]
+    derived = derive_format_fix_attempts(attempts)
+
+    assert [a.variant for a in derived] == [f"baseline{FMTFIX_SUFFIX}"] * 2
+    assert derived[0].predicted == "ABC1234"      # 救回
+    assert derived[1].predicted == "XYZ5678"      # 本來就對,不動
+    # 尺寸與信心度照抄 —— 校正只碰字串
+    assert derived[0].width == attempts[0].width
+    assert derived[0].confidence == attempts[0].confidence
+
+
+def test_derive_is_idempotent_on_already_derived_rows() -> None:
+    """避免重複呼叫時長出 baseline+fmtfix+fmtfix。"""
+    attempts = [_attempt("a.jpg", "baseline", "A8C1234", "ABC1234")]
+    once = attempts + derive_format_fix_attempts(attempts)
+    twice = once + derive_format_fix_attempts(once)
+    assert len(twice) == 3
+
+
+def test_summarise_format_fix_counts_fixed_and_broken() -> None:
+    """救回與弄壞要分開看 —— 淨值為零不代表沒事發生。"""
+    attempts = [
+        _attempt("a.jpg", "cubic_3x", "A8C1234", "ABC1234"),   # 會被救回
+        _attempt("b.jpg", "cubic_3x", "XYZ5678", "XYZ5678"),   # 本來就對
+        _attempt("c.jpg", "cubic_3x", "ABC12345", "ABC1234"),  # 無解
+    ]
+    attempts += derive_format_fix_attempts(attempts)
+    summary = summarise_format_fix(attempts)[0]
+
+    assert summary.base_variant == "cubic_3x"
+    assert summary.total == 3
+    assert summary.base_correct == 1
+    assert summary.fixed_correct == 2
+    assert summary.fixed == ["a.jpg"]
+    assert summary.broken == []
+    assert summary.net_gain == 1
+    assert summary.corrected == 1
+    assert summary.already_valid == 1
+    assert summary.no_candidate == 1
+
+
+def test_summarise_format_fix_records_a_correction_that_went_wrong() -> None:
+    """把對的改成錯的一定要看得見 —— 這是決定要不要上線的關鍵數字。
+
+    這不是假想的情況:真實車牌只要不符合 plate_format 的四種格式(特殊牌、
+    外交牌、電動車牌),OCR 讀對了反而會被校正成另一個「合法」的字串。
+    """
+    attempts = [_attempt("a.jpg", "baseline", "A8C1234", "A8C1234")]
+    attempts += derive_format_fix_attempts(attempts)
+    summary = summarise_format_fix(attempts)[0]
+
+    assert summary.broken == ["a.jpg"]
+    assert summary.net_gain == -1
+
+
+def test_format_fix_csv_is_written(tmp_path: Path) -> None:
+    attempts = [_attempt("a.jpg", "baseline", "A8C1234", "ABC1234")]
+    attempts += derive_format_fix_attempts(attempts)
+    path = tmp_path / "fmtfix.csv"
+    write_format_fix(path, summarise_format_fix(attempts))
+
+    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    assert len(rows) == 1
+    assert rows[0]["base_variant"] == "baseline"
+    assert rows[0]["net_gain"] == "1"
+    assert rows[0]["fixed_files"] == "a.jpg"
+
+
+def test_detail_csv_carries_the_fmtfix_note(tmp_path: Path) -> None:
+    attempts = [_attempt("a.jpg", "baseline", "A0C1234", "ADC1234")]
+    attempts += derive_format_fix_attempts(attempts)
+    path = tmp_path / "detail.csv"
+    write_detail(path, attempts)
+
+    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    assert rows[0]["note"] == ""
+    # 兩解時把候選也記進去,人工核對才知道系統在猶豫什麼
+    assert rows[1]["note"].startswith(FIX_AMBIGUOUS)
+    assert "ADC1234" in rows[1]["note"]
